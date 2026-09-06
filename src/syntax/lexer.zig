@@ -944,6 +944,7 @@ const swift_lang = @import("lang/swift.zig");
 const java_lang = @import("lang/java.zig");
 const c_lang = @import("lang/c.zig");
 const cpp_lang = @import("lang/cpp.zig");
+const csharp_lang = @import("lang/csharp.zig");
 const lua_lang = @import("lang/lua.zig");
 const javascript_lang = @import("lang/javascript.zig");
 const typescript_lang = @import("lang/typescript.zig");
@@ -1466,6 +1467,71 @@ test "c++ adds its vocabulary to c and names a class" {
     try testing.expectEqualStrings("Tile", st.enclosingFn(5).?.name);
     // A method wins over the class it is in, brace on its own line and all.
     try testing.expectEqualStrings("pressable", st.enclosingFn(10).?.name);
+}
+
+test "runs tile the span and classify c# source" {
+    const src =
+        \\#nullable enable
+        \\using System;
+        \\
+        \\namespace App;
+        \\
+        \\public sealed record Tile(string Name)
+        \\{
+        \\    public bool Pressable { get; init; }
+        \\
+        \\    public async Task<int> RunAsync(int id)
+        \\    {
+        \\        var path = @"C:\temp";
+        \\        return await Task.FromResult(id > 0 ? 1 : 0);
+        \\    }
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&csharp_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "#nullable").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "namespace").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "record").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "async").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "init").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "Task<int>").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "var path").?);
+    // A verbatim literal: the backslash is an ordinary character, not an
+    // escape that would eat the closing quote.
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "@\"C:").?);
+    try testing.expectEqual(Kind.number, kindOf(runs, src, "0 ?").?);
+}
+
+test "c# names a method whose brace is on the next line" {
+    const src =
+        \\namespace App;
+        \\
+        \\public class Service
+        \\{
+        \\    public int Add(int a, int b)
+        \\    {
+        \\        return a + b;
+        \\    }
+        \\
+        \\    public string Name => "svc";
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&csharp_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    try testing.expectEqualStrings("Add", st.enclosingFn(6).?.name);
+    // Between the methods the class is the answer, and the file-scoped
+    // namespace is what is left above it.
+    try testing.expectEqualStrings("Service", st.enclosingFn(9).?.name);
+    try testing.expectEqualStrings("App", st.enclosingFn(1).?.name);
 }
 
 test "css hyphenated properties survive as one word" {
