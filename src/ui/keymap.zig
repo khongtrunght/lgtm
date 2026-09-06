@@ -120,11 +120,32 @@ pub const Command = enum {
     /// `w` for weakened, and it is the one letter in that family still free.
     next_risk,
     prev_risk,
-    /// A file over `large_file_lines` renders as a summary row; these open it
-    /// and fold it again. `zo` and `zc` because a deferred file is a fold in
-    /// everything but name, and vim already decided what those keys mean.
+    /// A file over `large_file_lines` renders as a summary row; `zo` opens it.
+    /// `zc` closes the innermost thing open at the cursor, which is vim's
+    /// meaning of it: the context `K` and `J` pulled into this hunk first, and
+    /// the file itself once there is none. A deferred file is a fold in
+    /// everything but name, and so is a window into one.
     expand_file,
     collapse_file,
+    /// Pull more of the file in around the hunk the cursor is on. Git shows
+    /// three lines either side; the buffers hold the rest, so these are the
+    /// keys that ask for it, `[diff] expand_lines` at a time.
+    ///
+    /// `K` and `J` because the direction is the whole of what they mean and
+    /// vim already spells up and down that way. Both are free in the body -
+    /// they move the selection in a list, and a list is a different mode.
+    expand_up,
+    expand_down,
+    /// `zf`: fold every window in this file at once. `zc` closes the one under
+    /// the cursor, and a reader who opened five hunks wants one press rather
+    /// than five and a hunt for where they were.
+    ///
+    /// Not vim's `zM`, which is the spelling for this, and not vim's `zf`,
+    /// which creates a fold over a motion. There is no fold to create here -
+    /// nothing in this tool folds a range the reader points at - so the key is
+    /// free, and `f` for fold reads better than a shifted `M` on something
+    /// pressed at the end of every file.
+    collapse_context,
     copy_text,
     copy_text_lines,
     copy_ref,
@@ -514,8 +535,11 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ leader, c('n'), c('m') }, .command = .next_fresh, .group = .turns },
     .{ .chords = &.{ leader, c('p'), c('m') }, .command = .prev_fresh, .group = .turns },
     .{ .chords = &.{ c('z'), c('i') }, .command = .toggle_ignored, .desc = "show the files [review] ignore hides", .group = .view },
-    .{ .chords = &.{ c('z'), c('o') }, .command = .expand_file, .desc = "open a file too large to render inline, or fold it again", .group = .view },
-    .{ .chords = &.{ c('z'), c('c') }, .command = .collapse_file, .desc = "open a file too large to render inline, or fold it again", .hint = null, .group = .view },
+    .{ .chords = &.{ c('z'), c('o') }, .command = .expand_file, .desc = "open a file too large to render inline", .group = .view },
+    .{ .chords = &.{ c('z'), c('c') }, .command = .collapse_file, .desc = "fold this hunk's context back, or a file opened with zo", .hint = null, .group = .view },
+    .{ .chords = &.{c('K')}, .command = .expand_up, .desc = "show more of the file above and below this hunk", .group = .view },
+    .{ .chords = &.{c('J')}, .command = .expand_down, .desc = "show more of the file above and below this hunk", .hint = null, .group = .view },
+    .{ .chords = &.{ c('z'), c('f') }, .command = .collapse_context, .desc = "fold every hunk's context in this file", .group = .view },
     .{ .chords = &.{c(':')}, .command = .command_line, .hint = "quit", .hint_keys = ":q", .desc = "command line (:q)", .group = .view },
     // `<C-r>` and not `<C-l>`: vim-tmux-navigator binds C-h/C-j/C-k/C-l at the
     // tmux *root* table and forwards them only to processes matching its vim

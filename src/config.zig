@@ -83,6 +83,11 @@ pub const Diff = struct {
     /// side by side wraps so hard it shows less than the flow view it
     /// replaced.
     split_min_width: u16 = 100,
+    /// Lines `K` and `J` pull in each press. Ten rather than three: three is
+    /// what git already showed and asking twice for one screenful is a key
+    /// worn out on a question the reader only asked once. A whole screen is
+    /// too much for the pane this is designed for, which is half of one.
+    expand_lines: u16 = 10,
 };
 
 pub const Ui = struct {
@@ -341,6 +346,16 @@ pub const Loader = struct {
                         return;
                     }
                     self.cfg.diff.split_min_width = @intCast(n);
+                } else if (std.mem.eql(u8, key, "expand_lines")) {
+                    const n = self.wantInt(src, line, key, value) orelse return;
+                    // One line is a slow way to read a file and 500 is the
+                    // file. Both ends catch a typo rather than hold an opinion
+                    // about what is comfortable in between.
+                    if (n < 1 or n > 500) {
+                        self.note(src, line, "diff.expand_lines must be between 1 and 500", .{});
+                        return;
+                    }
+                    self.cfg.diff.expand_lines = @intCast(n);
                 } else self.unknownKey(src, line, section, key);
             },
             .ui => {
@@ -752,6 +767,7 @@ pub const starter =
     \\# layout = "auto"           # "auto", "flow" (one column), or "split"
     \\# highlight = "line"        # "line" washes the row, "gutter" the sign
     \\# split_min_width = 100     # under this many columns, "auto" reads flow
+    \\# expand_lines = 10         # lines K and J pull in around a hunk
     \\
     \\# [ui]
     \\# icons = "unicode"         # "unicode", "ascii", or "nerd" (patched font)

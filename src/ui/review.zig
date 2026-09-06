@@ -19,6 +19,7 @@ const checkpoint = @import("../core/checkpoint.zig");
 const testrisk = @import("../core/testrisk.zig");
 const snapshot = @import("../snapshot/snapshot.zig");
 const diff = @import("../core/diff.zig");
+const expand_mod = @import("../core/expand.zig");
 const git = @import("../core/git.zig");
 const hunk = @import("../core/hunk.zig");
 const source = @import("../core/source.zig");
@@ -47,6 +48,14 @@ pub const Carry = struct {
     /// Zero when the cursor was on chrome or on a deleted line, neither of
     /// which has a line in the new file to carry anywhere.
     line: u32 = 0,
+};
+
+/// One hunk's pulled-out context: how far it has been grown either way.
+pub const Context = struct {
+    path: []u8,
+    hunk: u32,
+    above: u32 = 0,
+    below: u32 = 0,
 };
 
 pub const Review = struct {
@@ -132,6 +141,19 @@ pub const Review = struct {
     /// written, which is the only time you want to.
     expanded: std.ArrayList([]u8) = .empty,
 
+    /// Context the reader has pulled out of the buffers, per hunk. gpa-owned
+    /// and re-applied after every re-diff, for the reason `expanded` is: a
+    /// window that closed itself each time the agent typed would be a window
+    /// you could not read while it was being written.
+    ///
+    /// Keyed by the hunk's position in its file rather than by its change id,
+    /// which is the more stable of the two here: `inherit` is handed the
+    /// previous hunks only for the file the cursor is in, so every other
+    /// file's ids are reissued on each re-diff and a key made of one would
+    /// match nothing. A hunk appearing above this one moves the expansion to
+    /// its neighbour, which the next keypress corrects.
+    context: std.ArrayList(Context) = .empty,
+
     /// The mark, and what changed after it. The mark is gpa-owned for the same
     /// reason `prev_work` is; `fresh` is one bool per row of each file and
     /// belongs to the generation, because rows do.
@@ -157,6 +179,8 @@ pub const Review = struct {
         self.mark_at.deinit();
         for (self.expanded.items) |p| self.gpa.free(p);
         self.expanded.deinit(self.gpa);
+        for (self.context.items) |c| self.gpa.free(c.path);
+        self.context.deinit(self.gpa);
         self.gpa.free(self.prev_work);
         self.ids.deinit(self.gpa);
         self.cache.deinit(self.gpa);
@@ -347,6 +371,10 @@ pub const Review = struct {
             const prev: []const hunk.Hunk = if (i == index) carried else &.{};
             try self.ids.inherit(arena, prev, f.hunks);
         }
+
+        // Last, and after the ids: the rows `fresh` and `risk` are counted
+        // over have to be the rows the reader will see, context and all.
+        try self.applyContext();
 
         try self.refresh();
         try self.scanRisk();
@@ -610,6 +638,166 @@ pub const Review = struct {
 
         try self.remember(path);
         return true;
+    }
+
+    /// Pulls `want` more lines of context out of the buffers, on one side of
+    /// the hunk the reader is on, and remembers that it did.
+    ///
+    /// Returns how many lines arrived: fewer than asked at the edge of a file
+    /// or against the hunk next door, and zero when there is nothing left to
+    /// show. The caller says so rather than leaving a key that looks broken.
+    pub fn growContext(self: *Review, path: []const u8, hi: u32, dir: expand_mod.Dir, want: u32) !u32 {
+        const p = self.parsed orelse return 0;
+        const f = find(p.diff.files, path) orelse return 0;
+        const work = self.buffersFor(path).work orelse return 0;
+        const got = try expand_mod.grow(self.arena.allocator(), f, work, hi, dir, want);
+        if (got == 0) return 0;
+
+        const c = try self.contextFor(path, hi);
+        switch (dir) {
+            .up => c.above += got,
+            .down => c.below += got,
+        }
+        return got;
+    }
+
+    /// Folds one hunk's context back to what git showed.
+    ///
+    /// One hunk and not the file, because `K` and `J` grow one hunk: a fold
+    /// key that closed every hunk in the file would throw away four other
+    /// windows the reader had opened and is standing nowhere near.
+    ///
+    /// Rebuilt from the git output this generation is already holding rather
+    /// than by running git again. Nothing about what git would say has
+    /// changed - only what the reader asked to see on top of it - so a
+    /// subprocess here would be a re-diff to undo a keystroke.
+    pub fn foldContext(self: *Review, path: []const u8, hi: u32) !bool {
+        if (!self.forget(path, hi)) return false;
+        return self.refold(path);
+    }
+
+    /// Folds every window in one file. What `zf` is: `zc` closes the one at
+    /// the cursor, and this closes the file's, for a reader who opened five
+    /// hunks and does not want to walk back to each of them.
+    pub fn foldAllContext(self: *Review, path: []const u8) !bool {
+        if (!self.collapseContext(path)) return false;
+        return self.refold(path);
+    }
+
+    /// Git's own answer for one file, from the output already in hand, with
+    /// whatever windows are still recorded reopened on top of it.
+    fn refold(self: *Review, path: []const u8) !bool {
+        const p = self.parsed orelse return false;
+        const f = find(p.diff.files, path) orelse return false;
+
+        const arena = self.arena.allocator();
+        // Kept before the parse replaces the slice: ids are inherited from it,
+        // and the hash matches every hunk exactly, because the only thing that
+        // changed is context and context is what the hash leaves out.
+        const prev = f.hunks;
+        if (!(diff.reparse(arena, f, p.raw) catch false)) return false;
+        try self.ids.inherit(arena, prev, f.hunks);
+
+        if (self.sources) |srcs| {
+            if (srcs.find(path)) |s| {
+                source.attach(f, s.*) catch |err| switch (err) {
+                    error.ContentMismatch => self.torn = true,
+                    else => return err,
+                };
+            }
+        }
+        // Any hunk of this file the reader did not fold kept its window, and
+        // the parse just took it away with everything else.
+        try self.applyContextTo(f);
+        return true;
+    }
+
+    /// Forgets every window into a file. Used by the paths that are throwing
+    /// the whole file away anyway - folding a large one, leaving the review.
+    pub fn collapseContext(self: *Review, path: []const u8) bool {
+        var found = false;
+        var i: usize = 0;
+        while (i < self.context.items.len) {
+            if (std.mem.eql(u8, self.context.items[i].path, path)) {
+                self.gpa.free(self.context.items[i].path);
+                _ = self.context.swapRemove(i);
+                found = true;
+                continue;
+            }
+            i += 1;
+        }
+        return found;
+    }
+
+    fn forget(self: *Review, path: []const u8, hi: u32) bool {
+        for (self.context.items, 0..) |c, i| {
+            if (c.hunk != hi or !std.mem.eql(u8, c.path, path)) continue;
+            if (c.above == 0 and c.below == 0) return false;
+            self.gpa.free(c.path);
+            _ = self.context.swapRemove(i);
+            return true;
+        }
+        return false;
+    }
+
+    /// Puts back what the reader had pulled out, on the generation that has
+    /// just replaced the one they pulled it out of.
+    ///
+    /// Each entry is asked for what it actually got last time, not for what
+    /// was typed: a change that closed the gap between two hunks leaves less
+    /// room, and recording the smaller answer is what stops the request from
+    /// growing back the moment the gap reopens.
+    ///
+    /// Two hunks reaching for the same lines are settled by whichever is
+    /// applied first, which is the order they were expanded in. Nothing can
+    /// overlap however the tie falls - `grow` clamps against the hunk next
+    /// door either way - so the cost of the arbitrary order is at most a line
+    /// or two on the wrong side of a gap that has since narrowed.
+    fn applyContext(self: *Review) !void {
+        if (self.context.items.len == 0) return;
+        const p = self.parsed orelse return;
+        const arena = self.arena.allocator();
+
+        var i: usize = 0;
+        while (i < self.context.items.len) {
+            const c = &self.context.items[i];
+            const f = find(p.diff.files, c.path) orelse {
+                // The file is out of the review - committed, reverted, or now
+                // ignored. Keeping the entry would silently regrow it if it
+                // came back with different hunks.
+                self.gpa.free(c.path);
+                _ = self.context.swapRemove(i);
+                continue;
+            };
+            i += 1;
+            try self.regrow(arena, f, c);
+        }
+    }
+
+    /// The same, for one file that has just been re-parsed under the reader.
+    fn applyContextTo(self: *Review, f: *diff.FileDiff) !void {
+        const arena = self.arena.allocator();
+        for (self.context.items) |*c| {
+            if (!std.mem.eql(u8, c.path, f.path())) continue;
+            try self.regrow(arena, f, c);
+        }
+    }
+
+    fn regrow(self: *Review, arena: Allocator, f: *diff.FileDiff, c: *Context) !void {
+        const work = self.buffersFor(c.path).work orelse return;
+        if (c.hunk >= f.hunks.len) return;
+        c.above = try expand_mod.grow(arena, f, work, c.hunk, .up, c.above);
+        c.below = try expand_mod.grow(arena, f, work, c.hunk, .down, c.below);
+    }
+
+    fn contextFor(self: *Review, path: []const u8, hi: u32) !*Context {
+        for (self.context.items) |*c| {
+            if (c.hunk == hi and std.mem.eql(u8, c.path, path)) return c;
+        }
+        const owned = try self.gpa.dupe(u8, path);
+        errdefer self.gpa.free(owned);
+        try self.context.append(self.gpa, .{ .path = owned, .hunk = hi });
+        return &self.context.items[self.context.items.len - 1];
     }
 
     /// Folds a file the reader opened. Returns false when it was not one -

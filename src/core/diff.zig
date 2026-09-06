@@ -79,7 +79,18 @@ pub const ParseError = error{MalformedHunkHeader} || Allocator.Error;
 /// output the file was parsed from.
 pub fn materialise(gpa: Allocator, f: *FileDiff, raw: []const u8) ParseError!void {
     if (!f.summarised) return;
-    if (f.raw_hi > raw.len or f.raw_lo >= f.raw_hi) return;
+    if (try reparse(gpa, f, raw)) f.summarised = false;
+}
+
+/// Puts a file back to what git said about it, from the output git already
+/// gave. Returns false when the bytes are not there to do it with - a
+/// synthesised entry for an untracked file has no section of its own.
+///
+/// What `materialise` is built on, and what folding pulled-out context back
+/// uses: growing a hunk's context edits `hunks` and `lines` in place, and this
+/// is how the reader gets git's own answer back without git being asked again.
+pub fn reparse(gpa: Allocator, f: *FileDiff, raw: []const u8) ParseError!bool {
+    if (f.raw_hi > raw.len or f.raw_lo >= f.raw_hi) return false;
 
     const one = try parseLimited(gpa, raw[f.raw_lo..f.raw_hi], std.math.maxInt(u32));
     defer gpa.free(one.files);
@@ -88,13 +99,13 @@ pub fn materialise(gpa: Allocator, f: *FileDiff, raw: []const u8) ParseError!voi
             gpa.free(x.hunks);
             x.lines.deinit(gpa);
         }
-        return;
+        return false;
     }
 
     const full = one.files[0];
     f.hunks = full.hunks;
     f.lines = full.lines;
-    f.summarised = false;
+    return true;
 }
 
 /// Parses unified diff text. Unknown or unsupported sections are skipped rather

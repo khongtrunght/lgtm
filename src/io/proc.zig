@@ -19,6 +19,34 @@ pub const Output = struct {
     }
 };
 
+/// Opens a `git` argv: the program, the flag that keeps it out of the reader's
+/// way, and `-C <repo>` when there is one.
+///
+/// `--no-optional-locks` is the load-bearing part, and it lives here rather
+/// than at each call site because forgetting it once is enough to break
+/// somebody's rebase. `git status` and `git diff` refresh the index as a side
+/// effect and write it back under `.git/index.lock`; this tool runs both on a
+/// timer, against a repository whose owner is also using it. Two seconds into a
+/// `git pull --rebase` the reader gets
+///
+///     error: Unable to create '.git/index.lock': File exists.
+///     hint: Could not execute the todo command
+///
+/// from their *own* git, and the rebase stops mid-way. The flag drops the
+/// optional write and changes no answer, which is what it exists for.
+///
+/// Only *optional* locks: a command whose job is to write an index still
+/// writes one, so the snapshot store's plumbing is unaffected - it has an
+/// index of its own through `GIT_INDEX_FILE` and never touches the repo's.
+pub fn gitArgv(
+    gpa: Allocator,
+    argv: *std.ArrayList([]const u8),
+    repo: ?[]const u8,
+) Allocator.Error!void {
+    try argv.appendSlice(gpa, &.{ "git", "--no-optional-locks" });
+    if (repo) |r| try argv.appendSlice(gpa, &.{ "-C", r });
+}
+
 /// Runs argv to completion and captures stdout. Used for `git diff` and the
 /// bridge backends, which are the only subprocesses lgtm spawns.
 pub fn run(gpa: Allocator, io: Io, argv: []const []const u8, max_output: usize) RunError!Output {
@@ -67,6 +95,25 @@ pub fn runEnv(
             else => 1,
         },
     };
+}
+
+test "every git invocation carries --no-optional-locks" {
+    const gpa = std.testing.allocator;
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+
+    try gitArgv(gpa, &argv, null);
+    try std.testing.expectEqualStrings("git", argv.items[0]);
+    // Second, and before any subcommand: it is a top-level option, and a
+    // reader mid-rebase is what it is there for.
+    try std.testing.expectEqualStrings("--no-optional-locks", argv.items[1]);
+    try std.testing.expectEqual(@as(usize, 2), argv.items.len);
+
+    argv.clearRetainingCapacity();
+    try gitArgv(gpa, &argv, "/tmp/repo");
+    try std.testing.expectEqualStrings("--no-optional-locks", argv.items[1]);
+    try std.testing.expectEqualStrings("-C", argv.items[2]);
+    try std.testing.expectEqualStrings("/tmp/repo", argv.items[3]);
 }
 
 test "run captures stdout" {

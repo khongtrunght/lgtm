@@ -87,6 +87,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     app.wrap = opts.cfg.ui.wrap;
     app.layout = opts.cfg.diff.layout;
     app.split_min_width = opts.cfg.diff.split_min_width;
+    app.expand_lines = opts.cfg.diff.expand_lines;
     app.highlight = switch (opts.cfg.diff.highlight) {
         .gutter => .gutter,
         .line => .line,

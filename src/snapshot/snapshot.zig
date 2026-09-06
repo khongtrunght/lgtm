@@ -270,7 +270,7 @@ pub fn readPaths(
         try req.append(gpa, '\n');
     }
 
-    const out = try proc.runWithInput(gpa, io, &.{ "git", "cat-file", "--batch" }, req.items, 64 << 20);
+    const out = try proc.runWithInput(gpa, io, &.{ "git", "--no-optional-locks", "cat-file", "--batch" }, req.items, 64 << 20);
     defer out.deinit(gpa);
     // Non-zero means the ref is gone - pruned, or someone deleted it. Not an
     // error worth surfacing: the mark simply cannot be restored, and an empty

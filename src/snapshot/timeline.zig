@@ -92,10 +92,10 @@ pub fn read(
     // ids are what makes a self-revert detectable. `--no-abbrev` because two
     // abbreviated ids that match may still be two different blobs.
     const out = try proc.run(gpa, io, &.{
-        "git",                         "log",
-        "--format=%x00%H %ct%n%B%x01", "--numstat",
-        "--raw",                       "--no-abbrev",
-        head_ref,
+        "git",         "--no-optional-locks",
+        "log",         "--format=%x00%H %ct%n%B%x01",
+        "--numstat",   "--raw",
+        "--no-abbrev", head_ref,
     }, 8 << 20);
     errdefer out.deinit(gpa);
     if (out.exit_code != 0) {

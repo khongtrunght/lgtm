@@ -45,12 +45,14 @@ mark_on_submit = true
 | `layout` | `"auto"` | `"auto"`, `"flow"` or `"split"`. `flow` is the one-column diff; `split` is side by side. `auto` is responsive: side by side when the pane is wide enough, flow when it is not. `\|` or `-` switches views for the session, and switching beats `auto`. `"unified"` is accepted as a spelling of `"flow"` |
 | `highlight` | `"line"` | `"line"` washes the whole changed row; `"gutter"` keeps the colour in the sign and the line number and leaves the code to the syntax highlighting |
 | `split_min_width` | `100` | Below this many columns, `auto` reads flow. Each side needs a line number, a sign, a gutter and about forty columns of code, with a divider between them; under that, side by side wraps so hard it shows less than the flow view. Minimum 60, which is the floor below |
+| `expand_lines` | `10` | Lines `K` and `J` pull in around a hunk each press. Git shows three either side and the buffers hold the rest, so this is how much of the rest arrives at a time. Between 1 and 500 |
 
 ```toml
 [diff]
 layout = "auto"
 highlight = "line"
 split_min_width = 100
+expand_lines = 10
 ```
 
 The wash colours are mixed from the theme rather than written per theme: the

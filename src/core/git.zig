@@ -28,8 +28,7 @@ pub const Error = proc.RunError || diff.ParseError || error{ GitFailed, NotARepo
 fn insideRepo(gpa: Allocator, io: std.Io, repo: ?[]const u8) bool {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    argv.append(gpa, "git") catch return false;
-    if (repo) |r| argv.appendSlice(gpa, &.{ "-C", r }) catch return false;
+    proc.gitArgv(gpa, &argv, repo) catch return false;
     argv.appendSlice(gpa, &.{ "rev-parse", "--git-dir" }) catch return false;
 
     const out = proc.run(gpa, io, argv.items, 1 << 12) catch return false;
@@ -125,8 +124,7 @@ fn diffBase(
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
 
-    try argv.append(gpa, "git");
-    if (repo) |r| try argv.appendSlice(gpa, &.{ "-C", r });
+    try proc.gitArgv(gpa, &argv, repo);
     // `HEAD` normally, `--cached` in a repository whose first commit has not
     // happened yet - see the retry below.
     try argv.appendSlice(gpa, &.{ "diff", base });
@@ -276,8 +274,7 @@ fn untracked(
 ) Error!Untracked {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.append(gpa, "git");
-    if (repo) |r| try argv.appendSlice(gpa, &.{ "-C", r });
+    try proc.gitArgv(gpa, &argv, repo);
     try argv.appendSlice(gpa, &.{ "ls-files", "--others", "--exclude-standard" });
     // The same exclusions the tracked side got. A new generated file is still
     // a generated file, and hiding it from one half of the review only would
@@ -386,7 +383,7 @@ fn synthesiseAdd(gpa: Allocator, path: []const u8, bytes: []const u8) Allocator.
 /// Paths that differ from HEAD, for the watcher to narrow re-diffs to.
 /// One subprocess instead of N stat calls.
 pub fn changedPaths(gpa: Allocator, io: std.Io) Error![][]const u8 {
-    const out = try proc.run(gpa, io, &.{ "git", "diff", "HEAD", "--name-only" }, max_diff_bytes);
+    const out = try proc.run(gpa, io, &.{ "git", "--no-optional-locks", "diff", "HEAD", "--name-only" }, max_diff_bytes);
     defer out.deinit(gpa);
     if (out.exit_code != 0) return error.GitFailed;
 
@@ -425,8 +422,8 @@ pub fn snapshotPaths(gpa: Allocator, io: std.Io) Error![][]const u8 {
         for (list.items) |p| gpa.free(p);
         list.deinit(gpa);
     }
-    try collectPaths(gpa, io, &list, &.{ "git", "diff", "HEAD", "--name-only" });
-    try collectPaths(gpa, io, &list, &.{ "git", "ls-files", "--others", "--exclude-standard" });
+    try collectPaths(gpa, io, &list, &.{ "git", "--no-optional-locks", "diff", "HEAD", "--name-only" });
+    try collectPaths(gpa, io, &list, &.{ "git", "--no-optional-locks", "ls-files", "--others", "--exclude-standard" });
     return list.toOwnedSlice(gpa);
 }
 
@@ -461,7 +458,7 @@ fn collectPaths(
 /// a directory the agent creates is seen: the parent fires when a subdirectory
 /// appears under it, and the caller adds the new one.
 pub fn trackedDirs(gpa: Allocator, io: std.Io) Error![][]const u8 {
-    const out = try proc.run(gpa, io, &.{ "git", "ls-files" }, max_diff_bytes);
+    const out = try proc.run(gpa, io, &.{ "git", "--no-optional-locks", "ls-files" }, max_diff_bytes);
     defer out.deinit(gpa);
     if (out.exit_code != 0) return error.GitFailed;
 
@@ -508,7 +505,7 @@ pub const max_files = 50_000;
 /// result, about 9.5 ms at 200,000 paths, which is what `max_files` is for.
 pub fn projectFiles(gpa: Allocator, io: std.Io) Error![][]const u8 {
     const out = try proc.run(gpa, io, &.{
-        "git", "ls-files", "--cached", "--others", "--exclude-standard",
+        "git", "--no-optional-locks", "ls-files", "--cached", "--others", "--exclude-standard",
     }, max_diff_bytes);
     defer out.deinit(gpa);
     if (out.exit_code != 0) return error.GitFailed;
@@ -538,8 +535,8 @@ pub fn projectFiles(gpa: Allocator, io: std.Io) Error![][]const u8 {
 /// count came out short.
 pub fn hiddenCount(gpa: Allocator, io: std.Io, ignore: []const []const u8, base: []const u8) u32 {
     if (ignore.len == 0) return 0;
-    return countMatching(gpa, io, &.{ "git", "diff", base, "--name-only" }, ignore) +
-        countMatching(gpa, io, &.{ "git", "ls-files", "--others", "--exclude-standard" }, ignore);
+    return countMatching(gpa, io, &.{ "git", "--no-optional-locks", "diff", base, "--name-only" }, ignore) +
+        countMatching(gpa, io, &.{ "git", "--no-optional-locks", "ls-files", "--others", "--exclude-standard" }, ignore);
 }
 
 fn countMatching(gpa: Allocator, io: std.Io, base: []const []const u8, pats: []const []const u8) u32 {

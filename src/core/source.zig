@@ -105,8 +105,7 @@ pub fn loadAt(
     if (wanted.items.len > 0) {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(gpa);
-        try argv.append(gpa, "git");
-        if (repo) |r| try argv.appendSlice(gpa, &.{ "-C", r });
+        try proc.gitArgv(gpa, &argv, repo);
         try argv.appendSlice(gpa, &.{ "cat-file", "--batch" });
 
         const out = try proc.runWithInput(gpa, io, argv.items, req.items, max_blob_bytes);
@@ -137,8 +136,7 @@ pub fn loadAt(
         if (wwant.items.len > 0) {
             var argv: std.ArrayList([]const u8) = .empty;
             defer argv.deinit(gpa);
-            try argv.append(gpa, "git");
-            if (repo) |r| try argv.appendSlice(gpa, &.{ "-C", r });
+            try proc.gitArgv(gpa, &argv, repo);
             try argv.appendSlice(gpa, &.{ "cat-file", "--batch" });
 
             const out = try proc.runWithInput(gpa, io, argv.items, wreq.items, max_blob_bytes);
