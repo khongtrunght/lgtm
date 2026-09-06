@@ -19,13 +19,43 @@
       ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
 
-      # Kept in step with .zigversion and build.zig.zon's minimum_zig_version.
-      zigVersion = "0.16.0";
+      # Both versions are read from the files that own them rather than
+      # repeated here.
+      #
+      # A .zon is a static document with no way to read a file of its own, so
+      # `build.zig.zon` has to hold the literal - and it is already the one
+      # source the binary itself uses, through `@import("build.zig.zon")` in
+      # build.zig. Nix cannot parse ZON, which is what the note here used to
+      # say and why the number was copied; but it does not need to parse it to
+      # read one line out of it, and a line is all this is.
+      #
+      # Written out, it drifted exactly as you would expect: the flake said
+      # 0.1.2 while the manifest said 0.1.3, so `nix build` produced a 0.1.3
+      # binary in a store path claiming 0.1.2.
+      #
+      # Line-wise rather than one regex over the whole file, because whether
+      # `.` crosses a newline is up to the regex implementation and this way
+      # the question never comes up. `.minimum_zig_version` does not match
+      # `.version`: the pattern is anchored, so the field name is whole.
+      fieldOf =
+        file: field:
+        let
+          lines = nixpkgs.lib.splitString "\n" (builtins.readFile file);
+          want = "[[:space:]]*\\.${field}[[:space:]]*=[[:space:]]*\"([^\"]+)\".*";
+          hits = builtins.filter (m: m != null) (map (l: builtins.match want l) lines);
+        in
+        if hits == [ ] then
+          throw "${toString file}: no .${field} = \"...\" line"
+        else
+          builtins.head (builtins.head hits);
 
-      # Kept in step with build.zig.zon's `.version`, which is what the binary
-      # itself prints. Nix cannot read a .zon at evaluation time, so this is the
-      # one place the number is repeated - bump both together.
-      lgtmVersion = "0.1.2";
+      # `.zigversion` is authoritative, so the dev shell's warning now reads
+      # the same file it compares against. `pkgs.zig_0_16` below is still a
+      # literal and still needs a hand on a Zig bump - nothing can derive an
+      # attribute name - which is exactly what the warning is there to catch.
+      zigVersion = nixpkgs.lib.removeSuffix "\n" (builtins.readFile ./.zigversion);
+
+      lgtmVersion = fieldOf ./build.zig.zon "version";
 
       # git and a bridge backend (tmux, wezterm or kitty) are runtime
       # dependencies, but they are assumed to be on the host already - mkShell

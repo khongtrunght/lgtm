@@ -263,6 +263,28 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
             try applyEvents(&app, &vx, w, gpa, &ws, events);
         }
 
+        // Before the send, because the point of picking a pane is to send to
+        // it: the picker sets both in one keystroke.
+        if (app.want_target) |id| {
+            app.want_target = null;
+            if (br.panes()) |p| {
+                p.setPane(id);
+                // Inference has been overruled by a person, so it must not run
+                // again and quietly disagree.
+                p.tried = true;
+            }
+        }
+
+        if (app.want_panes) {
+            app.want_panes = false;
+            const cx: bridge.Ctx = .{ .gpa = app.gpa, .io = app.io, .w = w };
+            if (!offerPanes(&app, &br, cx, null)) {
+                app.notice.set("no other {s} to send to", .{br.unit()});
+            } else {
+                app.notice.set("pick the {s} sends go to", .{br.unit()});
+            }
+        }
+
         if (app.want_send) |how| {
             app.want_send = null;
             try deliver(&app, &br, w, how, &saved);
@@ -297,6 +319,43 @@ const SavedTarget = struct {
 
 /// Performs a composed payload. Which bridge, and whether it degraded, is the
 /// bridge's business; what the status line says about it is this file's.
+/// Opens the pane picker over what inference would not choose between.
+///
+/// Returns false when there is nothing to offer - no multiplexer, a listing
+/// that failed, or a session holding no pane but ours - and the caller falls
+/// back to saying so. Best effort on the way in as well: a picker that could
+/// not be built is not worth an error, because the text is already safe on the
+/// clipboard by the time this runs.
+fn offerPanes(app: *App, br: *bridge.Bridge, cx: bridge.Ctx, text: ?[]const u8) bool {
+    var scratch: std.heap.ArenaAllocator = .init(app.gpa);
+    defer scratch.deinit();
+    const arena = scratch.allocator();
+
+    const found = br.candidates(cx, arena) catch return false;
+    if (found.len == 0) return false;
+
+    var rows: std.ArrayList(App.PaneRow) = .empty;
+    for (found) |c| {
+        // Everything the backend knew, in one line the filter can reach all
+        // of: two agents running the same binary differ by where they are and
+        // by what they have called themselves, and nothing else.
+        const label = std.fmt.allocPrint(arena, "{s}{s}{s}{s}{s}{s}{s}", .{
+            c.id,
+            if (c.where.len > 0) "  " else "",
+            c.where,
+            if (c.command.len > 0) "  " else "",
+            c.command,
+            if (c.title.len > 0) "  " else "",
+            c.title,
+        }) catch continue;
+        rows.append(arena, .{ .id = c.id, .label = label }) catch continue;
+    }
+    if (rows.items.len == 0) return false;
+
+    app.openPanePicker(rows.items, text) catch return false;
+    return true;
+}
+
 fn deliver(
     app: *App,
     br: *bridge.Bridge,
@@ -320,14 +379,28 @@ fn deliver(
             // its splits windows, and `%3` is not an id anywhere but tmux. A
             // message using another terminal's vocabulary sends someone
             // looking through documentation for a word it does not contain.
-            error.NoTarget => app.notice.set("no agent {s}: restart with --pane {s}", .{
-                br.unit(),
-                switch (br.*) {
-                    .tmux => "%N",
-                    .herdr => "w1:p1",
-                    else => "N",
-                },
-            }),
+            // Inference has already declined: there is more than the one
+            // other pane it can be sure of. Declining is the right answer for
+            // a machine and the wrong one for a person, who can see their own
+            // screen - so the list it refused to choose from is offered.
+            //
+            // The clipboard first, always. Whatever happens to the picker, the
+            // reader's text must not be the thing that goes missing.
+            error.NoTarget => {
+                _ = br.copyText(cx, text) catch {};
+                if (offerPanes(app, br, cx, text)) {
+                    app.notice.set("no {s} found - copied, and pick one below", .{br.unit()});
+                    return;
+                }
+                app.notice.set("no agent {s}: copied - restart with --pane {s}", .{
+                    br.unit(),
+                    switch (br.*) {
+                        .tmux => "%N",
+                        .herdr => "w1:p1",
+                        else => "N",
+                    },
+                });
+            },
             error.Multiline => app.notice.set("refusing to send a multi-line payload", .{}),
             else => app.notice.set("bridge: {t}", .{err}),
         }

@@ -295,7 +295,30 @@ pub const App = struct {
         browse,
         /// `<Space>lc`: every comment in the review, and Enter goes to one.
         comments,
+        /// The panes a send could go to, and Enter connects to one.
+        ///
+        /// Opened by hand, and opened for the reader when a send found no
+        /// target: inference refuses past two panes because a wrong guess
+        /// types into somebody's editor, and refusing is the right answer for
+        /// a machine and the wrong one for a person who can see their own
+        /// screen.
+        panes,
     } = .jump,
+    /// The panes the picker is listing, copied into `pick_arena` for the
+    /// reason the comment labels are: the list outlives the frame that built
+    /// it. Parallel to `pick_list`, whose rows are the labels drawn.
+    pane_ids: std.ArrayList([]const u8) = .empty,
+    /// What a send handed to the clipboard because it had no target. Sent to
+    /// the pane the reader then picks, so choosing one finishes the keystroke
+    /// that opened the picker rather than only preparing the next.
+    pending_send: ?[]const u8 = null,
+    /// The pane the reader picked, for the loop to point the bridge at. The
+    /// same channel `want_send` is and for the same reason: this file does not
+    /// talk to a multiplexer, it says what it wants done with one.
+    want_target: ?[]const u8 = null,
+    /// Set by `pick_pane`: open the picker with nothing waiting to be sent.
+    want_panes: bool = false,
+    target_buf: [64]u8 = undefined,
     /// The list the overlay is showing: the changed files for a jump, every
     /// file git knows about for a mention. Rebuilt when the overlay opens and
     /// owned here, because `selected` is asked outside any frame.
@@ -378,6 +401,7 @@ pub const App = struct {
         self.preview_arena.deinit();
         self.comments.deinit();
         self.pick_list.deinit(self.gpa);
+        self.pane_ids.deinit(self.gpa);
         if (self.project_paths.len > 0) git.freePaths(self.gpa, self.project_paths);
         self.frame_arena.deinit();
         self.* = undefined;
@@ -1057,6 +1081,9 @@ pub const App = struct {
             // Git shows three lines either side of a change and forgets the
             // rest; the buffers held the whole file all along. These are the
             // keys that ask for it.
+            // The loop owns the bridge, so this only says it wants the list;
+            // `want_panes` is the same channel `want_send` is.
+            .pick_pane => self.want_panes = true,
             .expand_up, .expand_down => try self.growContext(
                 body,
                 if (cmd == .expand_up) .up else .down,
@@ -1330,7 +1357,80 @@ pub const App = struct {
     /// changed ones first, in review order, then the rest - because mentioning
     /// an unchanged file to an agent is the whole point of `@`, and the file
     /// you are looking at is the one you are most likely to name.
+    /// One row of the pane picker, in this file's own vocabulary. The loop
+    /// composes these from whatever its bridge knows: `ui/app.zig` never sees
+    /// a multiplexer, and a picker is not the place to start.
+    pub const PaneRow = struct { id: []const u8, label: []const u8 };
+
+    /// Opens the picker over a list the loop has already gathered.
+    ///
+    /// `pending` is the payload the send could not deliver. It is on the
+    /// clipboard by the time this is called - losing the reader's text is
+    /// never the price of not knowing where to put it - and it is kept here so
+    /// that picking a pane sends it rather than merely arranging for the next
+    /// one to go somewhere.
+    pub fn openPanePicker(self: *App, rows: []const PaneRow, pending: ?[]const u8) Allocator.Error!void {
+        self.files_purpose = .panes;
+        self.pick_list.clearRetainingCapacity();
+        self.pane_ids.clearRetainingCapacity();
+        _ = self.pick_arena.reset(.retain_capacity);
+        const arena = self.pick_arena.allocator();
+
+        for (rows) |r| {
+            // Copied for the reason the comment labels are: this list is read
+            // on every keystroke of the filter, and whatever the loop built it
+            // from is gone by then.
+            const label = try arena.dupe(u8, r.label);
+            const id = try arena.dupe(u8, r.id);
+            try self.pane_ids.append(self.gpa, id);
+            try self.pick_list.append(self.gpa, .{
+                .path = label,
+                .added = 0,
+                .removed = 0,
+                .in_review = false,
+                .plain = true,
+            });
+        }
+
+        self.pending_send = if (pending) |t| try arena.dupe(u8, t) else null;
+        self.file_list.title = " panes ";
+        self.file_list.totals = null;
+        self.file_list.extra_keys = &.{};
+        self.file_list.open(0);
+        self.mode = .finder;
+    }
+
+    /// `<CR>` in the picker: connect to that pane, and send what was waiting.
+    fn pickPane(self: *App, at: ?u32) void {
+        const i = at orelse {
+            self.closeFiles();
+            return;
+        };
+        if (i >= self.pane_ids.items.len) {
+            self.closeFiles();
+            return;
+        }
+        const id = self.pane_ids.items[i];
+        const n = @min(id.len, self.target_buf.len);
+        @memcpy(self.target_buf[0..n], id[0..n]);
+        self.want_target = self.target_buf[0..n];
+
+        // The payload has to leave the pick arena before `closeFiles` resets
+        // it, and `outgoing` is the buffer the loop reads a send from.
+        if (self.pending_send) |text| {
+            self.outgoing.clearRetainingCapacity();
+            self.outgoing.appendSlice(self.gpa, text) catch {};
+            self.want_send = .send;
+        }
+        self.pending_send = null;
+        self.closeFiles();
+    }
+
     fn buildPickList(self: *App) void {
+        // The picker's rows come from the loop, not from the review, and its
+        // arena holds them: rebuilding here would empty the list under the
+        // reader's filter.
+        if (self.files_purpose == .panes) return;
         self.pick_list.clearRetainingCapacity();
         _ = self.pick_arena.reset(.retain_capacity);
         const arena = self.pick_arena.allocator();
@@ -1471,7 +1571,13 @@ pub const App = struct {
 
         switch (self.file_list.feed(key)) {
             .stay => {
-                if (filtering and self.file_list.filter.text().len > 0) {
+                // The turn list expands as it is filtered, because a search
+                // that skipped folded rows would lie. Only that list: every
+                // other purpose has its rows already, and the picker's are the
+                // loop's - `fillTurnRows` would replace them with a timeline.
+                if (filtering and self.files_purpose == .turns and
+                    self.file_list.filter.text().len > 0)
+                {
                     self.turns_expanded = true;
                     self.rebuildTurns();
                 }
@@ -1479,6 +1585,7 @@ pub const App = struct {
             .close => self.closeFiles(),
             .open => {
                 const picked = self.file_list.selected(self.pick_list.items);
+                if (self.files_purpose == .panes) return self.pickPane(picked);
                 if (self.files_purpose == .turns) {
                     const i = picked orelse {
                         self.closeFiles();
@@ -2141,6 +2248,58 @@ pub const App = struct {
         fx.app.side = .old;
         const left = fx.app.cursorCell(body_rows).?;
         try testing.expectEqual(@as(f32, @floatFromInt(gutter)), left.col);
+    }
+
+    test "the pane picker lists what it was handed and connects to one" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        const rows = [_]App.PaneRow{
+            .{ .id = "%1", .label = "%1  a:1.0  zsh  shell" },
+            .{ .id = "%7", .label = "%7  a:2.0  claude  reviewing the diff" },
+        };
+        try fx.app.openPanePicker(&rows, "#3 src/main.zig:12");
+
+        try testing.expectEqual(event.Mode.finder, fx.app.mode);
+        try testing.expectEqual(@as(usize, 2), fx.app.pick_list.items.len);
+        try testing.expectEqualStrings("%7  a:2.0  claude  reviewing the diff", fx.app.pick_list.items[1].path);
+        // Rows are labels, not paths: no filetype icon is guessed from one.
+        try testing.expect(fx.app.pick_list.items[1].plain);
+
+        // Picking asks the loop for two things at once, which is the point:
+        // connect, and deliver what the failed send was carrying.
+        fx.app.pickPane(1);
+        try testing.expectEqualStrings("%7", fx.app.want_target.?);
+        try testing.expectEqual(App.Delivery.send, fx.app.want_send.?);
+        try testing.expectEqualStrings("#3 src/main.zig:12", fx.app.outgoing.items);
+        try testing.expectEqual(event.Mode.normal, fx.app.mode);
+    }
+
+    test "the picker opened by hand sends nothing" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        const rows = [_]App.PaneRow{.{ .id = "%2", .label = "%2  b:1.0  bash" }};
+        try fx.app.openPanePicker(&rows, null);
+        fx.app.pickPane(0);
+
+        // `<Space>t` is "point sends there", not "send now": there is nothing
+        // waiting, so nothing goes.
+        try testing.expectEqualStrings("%2", fx.app.want_target.?);
+        try testing.expect(fx.app.want_send == null);
+    }
+
+    test "leaving the picker connects to nothing" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        const rows = [_]App.PaneRow{.{ .id = "%2", .label = "%2  b:1.0  bash" }};
+        try fx.app.openPanePicker(&rows, "text");
+        fx.app.pickPane(null);
+
+        try testing.expect(fx.app.want_target == null);
+        try testing.expect(fx.app.want_send == null);
+        try testing.expectEqual(event.Mode.normal, fx.app.mode);
     }
 
     test "H and L put the cursor in the other column of a split row" {

@@ -38,6 +38,14 @@ pub const Pane = struct {
     /// thing that tells a user which pane is their agent.
     command: []const u8,
     active: bool,
+    /// `session:window.pane`, for the picker. Two agents running the same
+    /// binary have the same `command` and nothing else to tell them apart;
+    /// where they are is the first thing that does.
+    where: []const u8 = "",
+    /// `#{pane_title}`, which is what most agents write their current task
+    /// into - and so the field that makes a list of five identical commands
+    /// pickable. Empty when tmux does not give one.
+    title: []const u8 = "",
 };
 
 /// `tmux send-keys -t <pane> -l -- <text>`.
@@ -62,17 +70,23 @@ pub fn sendArgv(arena: Allocator, pane: []const u8, text: []const u8) Allocator.
 /// `soleOther` still refuses past two either way, so the far listing widens
 /// what can be found without widening what can be guessed.
 pub fn listArgv(arena: Allocator, all_sessions: bool) Allocator.Error![]const []const u8 {
-    const format = "#{pane_id}\t#{pane_active}\t#{pane_current_command}";
+    const format = "#{pane_id}\t#{pane_active}\t#{pane_current_command}" ++
+        "\t#{session_name}:#{window_index}.#{pane_index}\t#{pane_title}";
     return if (all_sessions)
         arena.dupe([]const u8, &.{ "tmux", "list-panes", "-a", "-F", format })
     else
         arena.dupe([]const u8, &.{ "tmux", "list-panes", "-F", format });
 }
 
-/// One pane per line, three tab-separated fields. A line that does not have
-/// them is skipped rather than failing the listing: a tmux old enough to not
-/// know a format variable prints it back verbatim, and losing one pane from a
-/// picker is better than losing the picker.
+/// One pane per line, tab-separated. A line that does not have the first
+/// three fields is skipped rather than failing the listing: a tmux old enough
+/// to not know a format variable prints it back verbatim, and losing one pane
+/// from a picker is better than losing the picker.
+///
+/// The last two are optional for the same reason, and they are last so that
+/// they can be: a tmux that answers three fields still drives inference, which
+/// only ever needed the id. The title takes everything remaining, tabs
+/// included, because it is a user's sentence and not a field this wrote.
 pub fn parsePanes(arena: Allocator, out: []const u8) Allocator.Error![]Pane {
     var panes: std.ArrayList(Pane) = .empty;
     var lines = std.mem.tokenizeScalar(u8, out, '\n');
@@ -83,10 +97,14 @@ pub fn parsePanes(arena: Allocator, out: []const u8) Allocator.Error![]Pane {
         const active = fields.next() orelse continue;
         const command = fields.next() orelse continue;
         if (id.len == 0 or id[0] != pane_sigil) continue;
+        const where = fields.next() orelse "";
+        const title = fields.rest();
         try panes.append(arena, .{
             .id = id,
             .active = std.mem.eql(u8, active, "1"),
             .command = command,
+            .where = where,
+            .title = std.mem.trimEnd(u8, title, "\r"),
         });
     }
     return panes.toOwnedSlice(arena);
@@ -252,6 +270,36 @@ test "panes parse into id, command and which one is active" {
     try testing.expectEqualStrings("claude", panes[0].command);
     try testing.expect(!panes[0].active);
     try testing.expect(panes[1].active);
+}
+
+test "a pane listing carries where it is and what it calls itself" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+
+    const panes = try parsePanes(
+        a.allocator(),
+        "%604\t1\t2.1.261\tlgtm:3.0\tlgtm#1 language support\n",
+    );
+    try testing.expectEqual(@as(usize, 1), panes.len);
+    try testing.expectEqualStrings("%604", panes[0].id);
+    try testing.expectEqualStrings("2.1.261", panes[0].command);
+    try testing.expectEqualStrings("lgtm:3.0", panes[0].where);
+    // The title is a person's sentence, so it takes the rest of the line -
+    // tabs in it are the title's, not a field boundary.
+    try testing.expectEqualStrings("lgtm#1 language support", panes[0].title);
+}
+
+test "a tmux that answers only the first three fields still drives inference" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+
+    // What inference has always needed is the id; the picker's two fields are
+    // last so that a tmux too old to know them costs nothing else.
+    const panes = try parsePanes(a.allocator(), "%1\t1\tsh\n%2\t0\tclaude\n");
+    try testing.expectEqual(@as(usize, 2), panes.len);
+    try testing.expectEqualStrings("", panes[0].where);
+    try testing.expectEqualStrings("", panes[1].title);
+    try testing.expectEqualStrings("%2", soleOther(panes, "%1").?);
 }
 
 test "a line tmux could not format is skipped, not fatal" {

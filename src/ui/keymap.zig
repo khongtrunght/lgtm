@@ -136,6 +136,10 @@ pub const Command = enum {
     /// they move the selection in a list, and a list is a different mode.
     expand_up,
     expand_down,
+    /// The pane picker, opened deliberately. It opens itself when a send finds
+    /// no target, but a picker reachable only by failing cannot be used to
+    /// *change* where sends go - which is the other half of what it is for.
+    pick_pane,
     /// `zf`: fold every window in this file at once. `zc` closes the one under
     /// the cursor, and a reader who opened five hunks wants one press rather
     /// than five and a hunt for where they were.
@@ -539,6 +543,7 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ c('z'), c('c') }, .command = .collapse_file, .desc = "fold this hunk's context back, or a file opened with zo", .hint = null, .group = .view },
     .{ .chords = &.{c('K')}, .command = .expand_up, .desc = "show more of the file above and below this hunk", .group = .view },
     .{ .chords = &.{c('J')}, .command = .expand_down, .desc = "show more of the file above and below this hunk", .hint = null, .group = .view },
+    .{ .chords = &.{ leader, c('t') }, .command = .pick_pane, .desc = "pick the pane sends go to", .group = .send },
     .{ .chords = &.{ c('z'), c('f') }, .command = .collapse_context, .desc = "fold every hunk's context in this file", .group = .view },
     .{ .chords = &.{c(':')}, .command = .command_line, .hint = "quit", .hint_keys = ":q", .desc = "command line (:q)", .group = .view },
     // `<C-r>` and not `<C-l>`: vim-tmux-navigator binds C-h/C-j/C-k/C-l at the
