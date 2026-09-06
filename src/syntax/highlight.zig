@@ -25,6 +25,7 @@ pub const max_lines = 10_000;
 const zig_lang = @import("lang/zig.zig");
 const rust_lang = @import("lang/rust.zig");
 const go_lang = @import("lang/go.zig");
+const c_lang = @import("lang/c.zig");
 const python_lang = @import("lang/python.zig");
 const swift_lang = @import("lang/swift.zig");
 const lua_lang = @import("lang/lua.zig");
@@ -38,6 +39,7 @@ pub const languages = [_]*const LangDef{
     &zig_lang.def,
     &rust_lang.def,
     &go_lang.def,
+    &c_lang.def,
     &python_lang.def,
     &swift_lang.def,
     &lua_lang.def,
@@ -330,6 +332,8 @@ test "extensions map to languages, case-insensitively" {
     try testing.expectEqualStrings("zig", byExtension("src/core/diff.zig").?.name);
     try testing.expectEqualStrings("rust", byExtension("src/main.RS").?.name);
     try testing.expectEqualStrings("go", byExtension("cmd/serve.go").?.name);
+    try testing.expectEqualStrings("c", byExtension("src/main.c").?.name);
+    try testing.expectEqualStrings("c", byExtension("include/lgtm.h").?.name);
     try testing.expectEqualStrings("python", byExtension("tools/run.py").?.name);
     try testing.expectEqualStrings("swift", byExtension("Views/Launchpad.swift").?.name);
     try testing.expectEqualStrings("lua", byExtension("plugin/init.lua").?.name);
