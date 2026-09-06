@@ -311,6 +311,11 @@ An unchanged file opens whole, outside the review — still readable, still
 commentable. A file too large to render inline opens with `zo` and folds again
 with `zc`.
 
+Git shows three lines either side of a change; `lgtm` holds the whole file, so
+`K` and `J` pull more of it in above and below the hunk the cursor is on, ten
+lines a press (`[diff] expand_lines`). The rule between two hunks says lines are
+hidden there, so it goes when they meet. `zc` folds a file's context back.
+
 A file that is not text - an image, a binary, an archive - never renders its
 bytes. It gets one row saying what it is, how big it is, and for an image how
 large: `PNG image | 1200x630 | 8.5 KB`.
@@ -406,6 +411,7 @@ A second `,` keeps going back rather than turning round, the way vim's does.
 | `H` `L` | side by side: focus the old or the new column |
 | `zi` | show the files `[review] ignore` hides |
 | `zo` `zc` | open a file too large to render inline, or fold it |
+| `K` `J` | show more of the file above or below this hunk |
 | `<C-r>` | re-diff now |
 | `<Space>e` | open this line in `$EDITOR` |
 | `?` | every key, from your bindings |

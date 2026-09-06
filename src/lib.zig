@@ -26,6 +26,7 @@ pub const review = @import("core/review.zig");
 pub const event = @import("core/event.zig");
 pub const binary = @import("core/binary.zig");
 pub const diff = @import("core/diff.zig");
+pub const expand = @import("core/expand.zig");
 pub const git = @import("core/git.zig");
 pub const hunk = @import("core/hunk.zig");
 pub const source = @import("core/source.zig");
@@ -51,6 +52,7 @@ test {
     _ = event;
     _ = binary;
     _ = diff;
+    _ = expand;
     _ = git;
     _ = hunk;
     _ = source;

@@ -18,6 +18,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const diff = @import("../core/diff.zig");
+const expand = @import("../core/expand.zig");
 const event = @import("../core/event.zig");
 const fs_mod = @import("../io/fs.zig");
 const git = @import("../core/git.zig");
@@ -324,6 +325,9 @@ pub const App = struct {
     /// in a pane this narrow are each narrower than the code in them, and the
     /// mode that is worse in the home environment must not appear there.
     split_min_width: u16 = 100,
+    /// `[diff] expand_lines`. How much of the file `K` and `J` pull in around
+    /// a hunk each press.
+    expand_lines: u16 = 10,
     /// Which column of a split row the cursor is in, moved by `H` and `L`.
     /// The new file by default: it is the code that is there now, and it is
     /// what a reference, a comment and a yank are almost always about.
@@ -553,6 +557,43 @@ pub const App = struct {
         // is re-anchored through `core/anchor.zig`; the row index is only the
         // fallback for a line that is genuinely gone.
         try self.rebuildRows(.line);
+    }
+
+    /// `K` and `J`: more of the file around the hunk the cursor is on.
+    ///
+    /// The cursor holds its *line*, not its row. Growing upwards inserts rows
+    /// above it, so keeping the row index would slide the cursor onto whatever
+    /// text moved under it - and the scroll offset is left alone on purpose,
+    /// which is what makes the new lines appear where the reader was looking
+    /// rather than off the top of the pane.
+    fn growContext(self: *App, body: u16, dir: expand.Dir) !void {
+        const f = self.current() orelse return;
+        if (f.summarised or f.status == .binary) return;
+        const hi = self.rows.hunkAt(self.vp.cursor) orelse {
+            self.notice.set("no hunk here to open out", .{});
+            return;
+        };
+        const line = self.cursorLine();
+        const want = self.expand_lines;
+        const got = self.review.growContext(f.path(), hi, dir, want) catch 0;
+        if (got == 0) {
+            self.notice.set("nothing left to show {s} this hunk", .{
+                if (dir == .up) "above" else "below",
+            });
+            return;
+        }
+
+        // `current()` is re-read: the file lives in the diff arena and the
+        // grow replaced its line arrays.
+        try self.rebuildRows(.row);
+        if (self.current()) |g| {
+            if (line != 0) {
+                if (self.rowForFileLine(g, line)) |r| self.vp.cursor = r;
+            }
+        }
+        self.clampScroll(body);
+        self.placeCursor();
+        self.notice.set("{d} more line{s}", .{ got, if (got == 1) "" else "s" });
     }
 
     fn rebuildRows(self: *App, keep: Keep) !void {
@@ -990,8 +1031,24 @@ pub const App = struct {
                     self.notice.set("this file cannot be opened inline", .{});
                 }
             },
+            // Git shows three lines either side of a change and forgets the
+            // rest; the buffers held the whole file all along. These are the
+            // keys that ask for it.
+            .expand_up, .expand_down => try self.growContext(
+                body,
+                if (cmd == .expand_up) .up else .down,
+            ),
             .collapse_file => {
                 const f = self.current() orelse return;
+                // A file the reader has pulled context into folds that back
+                // first. `zc` is the fold key, and pulled-out context is a
+                // fold that has been opened by any other name.
+                if (!f.summarised and self.review.collapseContext(f.path())) {
+                    try self.rediff();
+                    self.clampScroll(body);
+                    self.notice.set("context folded", .{});
+                    return;
+                }
                 if (f.summarised) {
                     self.notice.set("this file is already folded", .{});
                     return;
@@ -2020,6 +2077,30 @@ pub const App = struct {
         fx.app.layout = .split;
         fx.app.relayout(20);
         try testing.expect(fx.app.split);
+    }
+
+    test "a hunk header does not send the cursor back across the pane" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+        try splitReplacement(fx);
+
+        const halves = rows_mod.Split.of(fx.app.vp.cols);
+        const gutter = rows_mod.gutter(&fx.files[0], .split);
+
+        // Row 0 is the hunk header: chrome, drawn across the whole pane, with
+        // no pair to take a side from. It takes the reader's side instead, or
+        // every `j` over a header would cross the pane and come back.
+        fx.app.side = .new;
+        fx.app.vp.cursor = 0;
+        const right = fx.app.cursorCell(body_rows).?;
+        try testing.expectEqual(
+            @as(f32, @floatFromInt(halves.column(.new).at + gutter)),
+            right.col,
+        );
+
+        fx.app.side = .old;
+        const left = fx.app.cursorCell(body_rows).?;
+        try testing.expectEqual(@as(f32, @floatFromInt(gutter)), left.col);
     }
 
     test "H and L put the cursor in the other column of a split row" {
@@ -4572,8 +4653,19 @@ pub const App = struct {
         // Whichever column `lineAt` chose, and never outside it: a cursor
         // standing in the other half would say the reader is pointing at a
         // line they are not.
+        //
+        // Chrome has no pair to take a side from, so it takes the reader's.
+        // A hunk header is drawn across the whole pane and is shorter than the
+        // code either side of it, so the column that fits it is the one the
+        // cursor is already in - and crossing the pane to sit on a header and
+        // crossing back on the next `j` reads as the view losing the reader's
+        // place. A row that genuinely has nothing on one side is a different
+        // case and still moves the cursor, which is `sideOn`'s answer.
+        const halves = rows_mod.Split.of(self.vp.cols);
         const half: ?rows_mod.Split.Column = if (self.rows.pairAt(row)) |p|
-            rows_mod.Split.of(self.vp.cols).column(self.sideOn(p))
+            halves.column(self.sideOn(p))
+        else if (self.split)
+            halves.column(self.side)
         else
             null;
         const base: u16 = if (half) |h| h.at else 0;
@@ -4585,9 +4677,12 @@ pub const App = struct {
         // Parking it at the first text column keeps it visible and keeps it
         // moving - returning null here blinks it out for a frame and then
         // teleports it, which is what a held `j` looked like.
-        const li = self.lineAt(row) orelse
-            return .{ .row = @floatFromInt(y), .col = @floatFromInt(gutter) };
-        if (li >= f.lines.len()) return .{ .row = @floatFromInt(y), .col = @floatFromInt(gutter) };
+        const parked: anim.Cursor.Cell = .{
+            .row = @floatFromInt(y),
+            .col = @floatFromInt(base + gutter),
+        };
+        const li = self.lineAt(row) orelse return parked;
+        if (li >= f.lines.len()) return parked;
 
         const avail = if (self.wrap) column -| gutter else 0;
         const cell = wrap_mod.locate(f.lines.text[li], avail, self.vp.metrics, self.vp.col);

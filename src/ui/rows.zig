@@ -167,6 +167,16 @@ pub const Rows = struct {
     }
 };
 
+/// Whether any new-file line between two consecutive hunks goes undrawn.
+///
+/// A hunk with no new-file lines - a pure deletion - sits between two lines
+/// rather than on one, so its last drawn line is `new_start` itself.
+fn hidesLines(prev: hunk.Hunk, next: hunk.Hunk) bool {
+    const prev_end = if (prev.new_count == 0) prev.new_start else prev.new_start + prev.new_count - 1;
+    const next_start = if (next.new_count == 0) next.new_start + 1 else next.new_start;
+    return next_start > prev_end + 1;
+}
+
 /// Width of the line-number column, from the largest number this file shows.
 pub fn numWidth(f: *const diff.FileDiff) u16 {
     var max: u32 = 1;
@@ -313,7 +323,10 @@ pub fn buildWith(
     }
 
     for (f.hunks, 0..) |h, hi| {
-        if (hi > 0) try b.items.append(gpa, .gap);
+        // The rule says lines are hidden here. Two hunks that context has
+        // grown until they touch have none between them, and drawing it there
+        // would be the chrome telling a lie about the file.
+        if (hi > 0 and hidesLines(f.hunks[hi - 1], h)) try b.items.append(gpa, .gap);
         try b.hunk_rows.append(gpa, @intCast(b.items.items.len));
         try b.items.append(gpa, .{ .hunk_header = @intCast(hi) });
         try b.body(h.lo, h.hi);
@@ -467,6 +480,43 @@ test "rows interleave headers, lines and one rule between hunks" {
     try testing.expect(rows.items[5] == .hunk_header);
     // No rule before the first hunk or after the last.
     try testing.expect(rows.items[rows.items.len - 1] == .line);
+}
+
+test "the rule between two hunks goes when nothing is hidden between them" {
+    const gpa = testing.allocator;
+    var f = try fixture(gpa);
+    defer freeFixture(gpa, &f);
+
+    // Context grown until the two meet: the first hunk now ends on line 8 and
+    // the second starts on 9, so there is nothing left for a rule to stand for.
+    f.hunks[0].new_count = 8;
+    f.hunks[0].old_count = 8;
+
+    var rows = try build(gpa, &f);
+    defer rows.deinit(gpa);
+
+    for (rows.items) |r| try testing.expect(r != .gap);
+    try testing.expect(rows.items[4] == .hunk_header);
+    // Both hunks are still hunks: the rule is chrome, not structure.
+    try testing.expectEqual(@as(usize, 2), rows.hunk_rows.len);
+}
+
+test "a pure deletion between two hunks still counts the line it sits on" {
+    const gpa = testing.allocator;
+    var f = try fixture(gpa);
+    defer freeFixture(gpa, &f);
+
+    // `@@ -9,1 +8,0 @@`: the deletion sits after new line 8, which the first
+    // hunk already ends on. Read as `new_start - 1` this would look like a
+    // hunk starting at 7 and overlapping the one before it.
+    f.hunks[0].new_count = 8;
+    f.hunks[0].old_count = 8;
+    f.hunks[1].new_start = 8;
+    f.hunks[1].new_count = 0;
+
+    var rows = try build(gpa, &f);
+    defer rows.deinit(gpa);
+    for (rows.items) |r| try testing.expect(r != .gap);
 }
 
 test "hunk lookup maps a cursor row to its hunk" {
