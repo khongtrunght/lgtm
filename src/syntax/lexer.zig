@@ -373,6 +373,21 @@ const Scan = struct {
         // One table lookup stands in for every opener test below. Most bytes
         // in source are not the start of a comment or a literal.
         if (self.def.delim_start[c]) {
+            // Block comments are tried first because Lua's `--[[` opens with
+            // its own line comment `--`: the other order takes the opener for
+            // a line comment and lets the block run on to the end of the file.
+            // No language has the conflict the other way round.
+            if (self.def.block_comment) |bc| {
+                if (self.match(bc.open)) {
+                    const start = self.i;
+                    self.i += bc.open.len;
+                    self.st.mode = .block_comment;
+                    self.st.nest = 1;
+                    self.expect_fn = false;
+                    return self.inBlockComment(start);
+                }
+            }
+
             for (self.def.line_comment) |lc| {
                 if (!self.match(lc)) continue;
                 const start = self.i;
@@ -385,17 +400,6 @@ const Scan = struct {
                 const start = self.i;
                 self.toLineEnd();
                 return self.emit(start, self.i, .string);
-            }
-
-            if (self.def.block_comment) |bc| {
-                if (self.match(bc.open)) {
-                    const start = self.i;
-                    self.i += bc.open.len;
-                    self.st.mode = .block_comment;
-                    self.st.nest = 1;
-                    self.expect_fn = false;
-                    return self.inBlockComment(start);
-                }
             }
 
             for (self.def.strings, 0..) |spec, si| {
@@ -447,9 +451,14 @@ const Scan = struct {
                 self.expect_fn = true;
                 self.expect_fn_body = self.def.fn_body_words.has(word);
             } else if (self.expect_fn and kind == .text) {
-                kind = .fn_name;
-                self.expect_fn = false;
-                try self.openFn(word, !self.expect_fn_body);
+                // `function M.foo()`: a qualifier means the declared name is
+                // still ahead, so `M` stays an ordinary word and the lookahead
+                // survives to reach `foo`.
+                if (!self.def.fn_qualified or !self.qualifierFollows()) {
+                    kind = .fn_name;
+                    self.expect_fn = false;
+                    try self.openFn(word, !self.expect_fn_body);
+                }
             } else {
                 self.expect_fn = false;
                 if (self.def.fn_decl_paren and kind == .text and self.appliedToArgs()) {
@@ -503,7 +512,9 @@ const Scan = struct {
                 // no parser - see lang/html.zig.
                 self.expect_tag = p == '<' or (p == '/' and self.expect_tag);
             }
-            self.expect_fn = false;
+            // A qualifier is part of the name's path, so unlike every other
+            // punctuation byte it does not end the lookahead.
+            if (!(self.def.fn_qualified and (p == '.' or p == ':'))) self.expect_fn = false;
             self.i += 1;
         }
         if (self.i == start) self.i += 1; // never stall
@@ -671,6 +682,13 @@ const Scan = struct {
                 if (open == 0) return;
             }
         }
+    }
+
+    /// `fn_qualified`: does a '.' or ':' follow the identifier that just
+    /// ended? Then it named a table on the way to the function, not the
+    /// function.
+    fn qualifierFollows(self: Scan) bool {
+        return self.i < self.end and (self.text[self.i] == '.' or self.text[self.i] == ':');
     }
 
     /// `fn_decl_paren`: is the identifier that just ended applied to an
@@ -914,6 +932,7 @@ const go_lang = @import("lang/go.zig");
 const python_lang = @import("lang/python.zig");
 const swift_lang = @import("lang/swift.zig");
 const java_lang = @import("lang/java.zig");
+const lua_lang = @import("lang/lua.zig");
 const javascript_lang = @import("lang/javascript.zig");
 const typescript_lang = @import("lang/typescript.zig");
 const css_lang = @import("lang/css.zig");
@@ -1168,6 +1187,125 @@ test "a java text block spans lines and holds bare quotes" {
     // The block closed, so the line after it lexes normally.
     try testing.expectEqual(Kind.type_name, kindOf(runs, src, "int n").?);
     try testing.expectEqual(Kind.number, kindOf(runs, src, "1;").?);
+}
+
+test "runs tile the span and classify lua source" {
+    const src =
+        \\--[[ a block
+        \\     comment ]]
+        \\local M = {}
+        \\
+        \\-- one line
+        \\function M.greet(name)
+        \\    local greeting = string.format("hello %s", name)
+        \\    return #greeting > 0x10 and greeting or nil
+        \\end
+        \\
+        \\return M
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&lua_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    // `--[[` has to beat `--`, or the block never closes.
+    try testing.expectEqual(Kind.comment, kindOf(runs, src, "a block").?);
+    try testing.expectEqual(Kind.comment, kindOf(runs, src, "-- one line").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "local M").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "string").?);
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "\"hello %s\"").?);
+    try testing.expectEqual(Kind.number, kindOf(runs, src, "0x10").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "end").?);
+}
+
+test "a lua long string is raw and spans lines" {
+    const src =
+        \\local sql = [[
+        \\  select 'a', "b" -- not a comment
+        \\]]
+        \\local n = 1
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&lua_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "select").?);
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "-- not a comment").?);
+    // The literal closed, so the line after it lexes normally.
+    try testing.expectEqual(Kind.number, kindOf(runs, src, "1").?);
+}
+
+test "lua names a function past the table it hangs off" {
+    const src =
+        \\local M = {}
+        \\
+        \\function M.greet(name)
+        \\    return name
+        \\end
+        \\
+        \\function M.Session:close()
+        \\    self.open = false
+        \\end
+        \\
+        \\local function helper()
+        \\    return 1
+        \\end
+        \\
+        \\M.cb = function()
+        \\    return 2
+        \\end
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&lua_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    try testing.expectEqualStrings("greet", st.enclosingFn(3).?.name);
+    // Every segment but the last is a qualifier, however many there are.
+    try testing.expectEqualStrings("close", st.enclosingFn(7).?.name);
+    try testing.expectEqualStrings("helper", st.enclosingFn(11).?.name);
+    // An anonymous function opens no span, so the binding above it does not
+    // acquire a name it never had.
+    try testing.expect(st.enclosingFn(15) == null);
+
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.fn_name, kindOf(runs, src, "greet").?);
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "M.greet").?);
+}
+
+test "lua spans close on indentation" {
+    const src =
+        \\function outer()
+        \\    local function inner()
+        \\        return 1
+        \\    end
+        \\    return inner
+        \\end
+        \\
+        \\function after()
+        \\    return 2
+        \\end
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&lua_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    try testing.expectEqualStrings("outer", st.enclosingFn(0).?.name);
+    try testing.expectEqualStrings("inner", st.enclosingFn(2).?.name);
+    // The inner `end` is at the inner declaration's indentation, so the line
+    // after it is back in `outer`.
+    try testing.expectEqualStrings("outer", st.enclosingFn(4).?.name);
+    try testing.expectEqualStrings("after", st.enclosingFn(7).?.name);
 }
 
 test "css hyphenated properties survive as one word" {
