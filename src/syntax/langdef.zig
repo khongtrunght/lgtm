@@ -95,6 +95,11 @@ pub const LangDef = struct {
     /// declaration look the same to a reader, and every other highlighter
     /// paints them alike.
     fn_decl_paren: bool = false,
+    /// Lua's `function M.foo()` and `function obj:method()`: the declared name
+    /// is the last segment of a path, not the first. A '.' or ':' straight
+    /// after a candidate name keeps the lookahead open, so the span is named
+    /// `foo` and not the module table it hangs off.
+    fn_qualified: bool = false,
     blocks: Blocks = .braces,
     /// Identifier start bytes beyond letters and '_': Zig's `@import`.
     ident_extra: []const u8 = "",
