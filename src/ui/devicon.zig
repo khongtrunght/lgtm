@@ -44,6 +44,7 @@ const by_extension: []const Entry = &.{
     .{ .ext = "jsx", .glyph = "\u{e74e}", .hue = .yellow },
     .{ .ext = "c", .glyph = "\u{e61e}", .hue = .blue }, // nf-custom-c
     .{ .ext = "h", .glyph = "\u{e61e}", .hue = .blue },
+    .{ .ext = "cs", .glyph = "\u{f031b}", .hue = .green }, // nf-md-language_csharp
     .{ .ext = "cpp", .glyph = "\u{e61d}", .hue = .blue }, // nf-custom-cpp
     .{ .ext = "hpp", .glyph = "\u{e61d}", .hue = .blue },
     .{ .ext = "java", .glyph = "\u{e738}", .hue = .red }, // nf-dev-java

@@ -100,6 +100,12 @@ pub const LangDef = struct {
     /// after a candidate name keeps the lookahead open, so the span is named
     /// `foo` and not the module table it hangs off.
     fn_qualified: bool = false,
+    /// C's `int main(void)\n{`: allow the body's brace to open on the line
+    /// after the signature. Java never needed it - its own style puts the
+    /// brace on the signature's line - and leaving it off by default is what
+    /// stops a call from reaching a block underneath it that has nothing to do
+    /// with it. One line and no further, for the same reason.
+    fn_block_own_line: bool = false,
     blocks: Blocks = .braces,
     /// Identifier start bytes beyond letters and '_': Zig's `@import`.
     ident_extra: []const u8 = "",

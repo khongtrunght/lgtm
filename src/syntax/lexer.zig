@@ -843,10 +843,20 @@ const Scan = struct {
             }
         } else return false;
 
+        var lines: u32 = 0;
         while (j < self.end) : (j += 1) {
             const c = self.text[j];
             if (c == '{') return true;
-            const tail = c == ' ' or c == '\t' or c == ',' or c == '.' or
+            if (c == '\n') {
+                // C writes a function's brace on its own line as often as not.
+                // One line and no further: two would let a call reach a block
+                // below it that it has nothing to do with.
+                if (!self.def.fn_block_own_line) return false;
+                lines += 1;
+                if (lines > 1) return false;
+                continue;
+            }
+            const tail = c == ' ' or c == '\t' or c == '\r' or c == ',' or c == '.' or
                 c == '<' or c == '>' or c == '&' or
                 std.ascii.isAlphanumeric(c) or c == '_' or c >= 0x80;
             if (!tail) return false;
@@ -932,6 +942,9 @@ const go_lang = @import("lang/go.zig");
 const python_lang = @import("lang/python.zig");
 const swift_lang = @import("lang/swift.zig");
 const java_lang = @import("lang/java.zig");
+const c_lang = @import("lang/c.zig");
+const cpp_lang = @import("lang/cpp.zig");
+const csharp_lang = @import("lang/csharp.zig");
 const lua_lang = @import("lang/lua.zig");
 const javascript_lang = @import("lang/javascript.zig");
 const typescript_lang = @import("lang/typescript.zig");
@@ -1306,6 +1319,219 @@ test "lua spans close on indentation" {
     // after it is back in `outer`.
     try testing.expectEqualStrings("outer", st.enclosingFn(4).?.name);
     try testing.expectEqualStrings("after", st.enclosingFn(7).?.name);
+}
+
+test "runs tile the span and classify c source" {
+    const src =
+        \\/* A block comment. */
+        \\#include <stdio.h>
+        \\#define MAX 0x10
+        \\
+        \\static const char *name = "hello";
+        \\
+        \\int main(int argc, char **argv)
+        \\{
+        \\    // one line
+        \\    struct stat st;
+        \\    return argc > 1 ? 0 : 'x';
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&c_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.comment, kindOf(runs, src, "/* A block").?);
+    try testing.expectEqual(Kind.comment, kindOf(runs, src, "// one line").?);
+    // A directive is one word, so it can be a keyword.
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "#include").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "#define").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "char *name").?);
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "\"hello\"").?);
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "'x'").?);
+    try testing.expectEqual(Kind.number, kindOf(runs, src, "0x10").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "struct").?);
+}
+
+test "a c function is named with its brace on the next line" {
+    const src =
+        \\int main(int argc, char **argv)
+        \\{
+        \\    return 0;
+        \\}
+        \\
+        \\static void helper(void) {
+        \\    puts("same line");
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&c_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    // The brace on its own line is half of all C, and Java's same-line rule
+    // would have named neither of these.
+    try testing.expectEqualStrings("main", st.enclosingFn(2).?.name);
+    try testing.expectEqualStrings("helper", st.enclosingFn(6).?.name);
+}
+
+test "a c type declaration does not steal its function's name" {
+    const src =
+        \\int run(void)
+        \\{
+        \\    struct stat st;
+        \\    union u_t v;
+        \\    if (stat("/tmp", &st) < 0)
+        \\        return -1;
+        \\    return 0;
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&c_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    // `struct stat st;` is ordinary C. With `struct` in `fn_decl` it would
+    // open a span at the same depth, close `run`, and take the header from
+    // every line under it.
+    for (2..7) |line| {
+        try testing.expectEqualStrings("run", st.enclosingFn(@intCast(line)).?.name);
+    }
+}
+
+test "a c call two lines above a block is not a declaration" {
+    const src =
+        \\void caller(void)
+        \\{
+        \\    setup(1);
+        \\
+        \\    {
+        \\        int scoped = 2;
+        \\    }
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&c_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    // One line of slack and no more: the bare block is two lines below the
+    // call, and `setup` must not have claimed it.
+    try testing.expectEqualStrings("caller", st.enclosingFn(5).?.name);
+}
+
+test "c++ adds its vocabulary to c and names a class" {
+    const src =
+        \\#include <vector>
+        \\
+        \\namespace app {
+        \\
+        \\class Tile : public Shape {
+        \\public:
+        \\    explicit Tile(std::string name) : name_(std::move(name)) {}
+        \\
+        \\    bool pressable() const noexcept
+        \\    {
+        \\        return !name_.empty();
+        \\    }
+        \\
+        \\private:
+        \\    std::string name_;
+        \\};
+        \\
+        \\}  // namespace app
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&cpp_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    // Inherited from C.
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "#include").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "bool").?);
+    // Added by C++.
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "namespace").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "explicit").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "noexcept").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "std").?);
+
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+    try testing.expectEqualStrings("Tile", st.enclosingFn(5).?.name);
+    // A method wins over the class it is in, brace on its own line and all.
+    try testing.expectEqualStrings("pressable", st.enclosingFn(10).?.name);
+}
+
+test "runs tile the span and classify c# source" {
+    const src =
+        \\#nullable enable
+        \\using System;
+        \\
+        \\namespace App;
+        \\
+        \\public sealed record Tile(string Name)
+        \\{
+        \\    public bool Pressable { get; init; }
+        \\
+        \\    public async Task<int> RunAsync(int id)
+        \\    {
+        \\        var path = @"C:\temp";
+        \\        return await Task.FromResult(id > 0 ? 1 : 0);
+        \\    }
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&csharp_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "#nullable").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "namespace").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "record").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "async").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "init").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "Task<int>").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "var path").?);
+    // A verbatim literal: the backslash is an ordinary character, not an
+    // escape that would eat the closing quote.
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "@\"C:").?);
+    try testing.expectEqual(Kind.number, kindOf(runs, src, "0 ?").?);
+}
+
+test "c# names a method whose brace is on the next line" {
+    const src =
+        \\namespace App;
+        \\
+        \\public class Service
+        \\{
+        \\    public int Add(int a, int b)
+        \\    {
+        \\        return a + b;
+        \\    }
+        \\
+        \\    public string Name => "svc";
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&csharp_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    try testing.expectEqualStrings("Add", st.enclosingFn(6).?.name);
+    // Between the methods the class is the answer, and the file-scoped
+    // namespace is what is left above it.
+    try testing.expectEqualStrings("Service", st.enclosingFn(9).?.name);
+    try testing.expectEqualStrings("App", st.enclosingFn(1).?.name);
 }
 
 test "css hyphenated properties survive as one word" {
