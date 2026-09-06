@@ -196,8 +196,7 @@ pub const Poller = struct {
     fn scan(self: *Poller) !std.ArrayList(Entry) {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(self.gpa);
-        try argv.append(self.gpa, "git");
-        if (self.opts.repo) |r| try argv.appendSlice(self.gpa, &.{ "-C", r });
+        try proc.gitArgv(self.gpa, &argv, self.opts.repo);
         try argv.appendSlice(self.gpa, &.{ "status", "--porcelain", "--untracked-files=all" });
 
         const out = try proc.run(self.gpa, self.io, argv.items, 16 << 20);
