@@ -596,6 +596,29 @@ pub const App = struct {
         self.notice.set("{d} more line{s}", .{ got, if (got == 1) "" else "s" });
     }
 
+    /// Where the cursor goes after a hunk's context is folded away. Its line
+    /// is the first answer and is often gone with the fold, so the hunk it was
+    /// reading is the second - never the row index it happened to hold, which
+    /// after the fold belongs to a line further down the file.
+    fn foldedTo(self: *App, hi: u32, body: u16) !void {
+        const line = self.cursorLine();
+        try self.rebuildRows(.row);
+        const f = self.current() orelse return;
+        if (line != 0) {
+            if (self.rowForFileLine(f, line)) |r| {
+                self.vp.cursor = r;
+                self.clampScroll(body);
+                self.placeCursor();
+                return;
+            }
+        }
+        if (hi < self.rows.hunk_rows.len) {
+            self.vp.cursor = @min(self.rows.hunk_rows[hi] + 1, self.rows.len() -| 1);
+        }
+        self.clampScroll(body);
+        self.placeCursor();
+    }
+
     fn rebuildRows(self: *App, keep: Keep) !void {
         const f = self.current() orelse {
             self.rows = rows_mod.Rows.empty;
@@ -1038,16 +1061,33 @@ pub const App = struct {
                 body,
                 if (cmd == .expand_up) .up else .down,
             ),
+            // `zf`: every window in the file, not just the one at the cursor.
+            .collapse_context => {
+                const f = self.current() orelse return;
+                const hi = self.rows.hunkAt(self.vp.cursor) orelse 0;
+                if (self.review.foldAllContext(f.path()) catch false) {
+                    try self.foldedTo(hi, body);
+                    self.notice.set("context folded in this file", .{});
+                } else {
+                    self.notice.set("no context to fold here", .{});
+                }
+            },
             .collapse_file => {
                 const f = self.current() orelse return;
-                // A file the reader has pulled context into folds that back
-                // first. `zc` is the fold key, and pulled-out context is a
-                // fold that has been opened by any other name.
-                if (!f.summarised and self.review.collapseContext(f.path())) {
-                    try self.rediff();
-                    self.clampScroll(body);
-                    self.notice.set("context folded", .{});
-                    return;
+                // Context the reader pulled in folds before the file does:
+                // `zc` closes the innermost thing open at the cursor, which is
+                // what it means in vim and what it should mean here. One hunk,
+                // because `K` and `J` open one - closing the file's other
+                // windows from a hunk the reader is standing nowhere near
+                // would be a fold key with a blast radius.
+                if (!f.summarised) {
+                    if (self.rows.hunkAt(self.vp.cursor)) |hi| {
+                        if (self.review.foldContext(f.path(), hi) catch false) {
+                            try self.foldedTo(hi, body);
+                            self.notice.set("context folded", .{});
+                            return;
+                        }
+                    }
                 }
                 if (f.summarised) {
                     self.notice.set("this file is already folded", .{});

@@ -314,7 +314,9 @@ with `zc`.
 Git shows three lines either side of a change; `lgtm` holds the whole file, so
 `K` and `J` pull more of it in above and below the hunk the cursor is on, ten
 lines a press (`[diff] expand_lines`). The rule between two hunks says lines are
-hidden there, so it goes when they meet. `zc` folds a file's context back.
+hidden there, so it goes when they meet. `zc` folds the context of the hunk
+under the cursor back again, the way it closes a fold in vim; the other hunks
+keep theirs, and `zf` folds the lot.
 
 A file that is not text - an image, a binary, an archive - never renders its
 bytes. It gets one row saying what it is, how big it is, and for an image how
@@ -410,7 +412,9 @@ A second `,` keeps going back rather than turning round, the way vim's does.
 | `\|` or `-` | side by side, or back to the flow view |
 | `H` `L` | side by side: focus the old or the new column |
 | `zi` | show the files `[review] ignore` hides |
-| `zo` `zc` | open a file too large to render inline, or fold it |
+| `zo` | open a file too large to render inline |
+| `zc` | fold this hunk's context back, or a file opened with `zo` |
+| `zf` | fold every hunk's context in this file |
 | `K` `J` | show more of the file above or below this hunk |
 | `<C-r>` | re-diff now |
 | `<Space>e` | open this line in `$EDITOR` |

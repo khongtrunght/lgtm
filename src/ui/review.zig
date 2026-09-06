@@ -661,9 +661,59 @@ pub const Review = struct {
         return got;
     }
 
-    /// Forgets what a file had been grown by. The caller rebuilds; this only
-    /// stops the next re-diff from putting the context back, which is the same
-    /// shape `collapse` has.
+    /// Folds one hunk's context back to what git showed.
+    ///
+    /// One hunk and not the file, because `K` and `J` grow one hunk: a fold
+    /// key that closed every hunk in the file would throw away four other
+    /// windows the reader had opened and is standing nowhere near.
+    ///
+    /// Rebuilt from the git output this generation is already holding rather
+    /// than by running git again. Nothing about what git would say has
+    /// changed - only what the reader asked to see on top of it - so a
+    /// subprocess here would be a re-diff to undo a keystroke.
+    pub fn foldContext(self: *Review, path: []const u8, hi: u32) !bool {
+        if (!self.forget(path, hi)) return false;
+        return self.refold(path);
+    }
+
+    /// Folds every window in one file. What `zf` is: `zc` closes the one at
+    /// the cursor, and this closes the file's, for a reader who opened five
+    /// hunks and does not want to walk back to each of them.
+    pub fn foldAllContext(self: *Review, path: []const u8) !bool {
+        if (!self.collapseContext(path)) return false;
+        return self.refold(path);
+    }
+
+    /// Git's own answer for one file, from the output already in hand, with
+    /// whatever windows are still recorded reopened on top of it.
+    fn refold(self: *Review, path: []const u8) !bool {
+        const p = self.parsed orelse return false;
+        const f = find(p.diff.files, path) orelse return false;
+
+        const arena = self.arena.allocator();
+        // Kept before the parse replaces the slice: ids are inherited from it,
+        // and the hash matches every hunk exactly, because the only thing that
+        // changed is context and context is what the hash leaves out.
+        const prev = f.hunks;
+        if (!(diff.reparse(arena, f, p.raw) catch false)) return false;
+        try self.ids.inherit(arena, prev, f.hunks);
+
+        if (self.sources) |srcs| {
+            if (srcs.find(path)) |s| {
+                source.attach(f, s.*) catch |err| switch (err) {
+                    error.ContentMismatch => self.torn = true,
+                    else => return err,
+                };
+            }
+        }
+        // Any hunk of this file the reader did not fold kept its window, and
+        // the parse just took it away with everything else.
+        try self.applyContextTo(f);
+        return true;
+    }
+
+    /// Forgets every window into a file. Used by the paths that are throwing
+    /// the whole file away anyway - folding a large one, leaving the review.
     pub fn collapseContext(self: *Review, path: []const u8) bool {
         var found = false;
         var i: usize = 0;
@@ -677,6 +727,17 @@ pub const Review = struct {
             i += 1;
         }
         return found;
+    }
+
+    fn forget(self: *Review, path: []const u8, hi: u32) bool {
+        for (self.context.items, 0..) |c, i| {
+            if (c.hunk != hi or !std.mem.eql(u8, c.path, path)) continue;
+            if (c.above == 0 and c.below == 0) return false;
+            self.gpa.free(c.path);
+            _ = self.context.swapRemove(i);
+            return true;
+        }
+        return false;
     }
 
     /// Puts back what the reader had pulled out, on the generation that has
@@ -709,11 +770,24 @@ pub const Review = struct {
                 continue;
             };
             i += 1;
-            const work = self.buffersFor(c.path).work orelse continue;
-            if (c.hunk >= f.hunks.len) continue;
-            c.above = try expand_mod.grow(arena, f, work, c.hunk, .up, c.above);
-            c.below = try expand_mod.grow(arena, f, work, c.hunk, .down, c.below);
+            try self.regrow(arena, f, c);
         }
+    }
+
+    /// The same, for one file that has just been re-parsed under the reader.
+    fn applyContextTo(self: *Review, f: *diff.FileDiff) !void {
+        const arena = self.arena.allocator();
+        for (self.context.items) |*c| {
+            if (!std.mem.eql(u8, c.path, f.path())) continue;
+            try self.regrow(arena, f, c);
+        }
+    }
+
+    fn regrow(self: *Review, arena: Allocator, f: *diff.FileDiff, c: *Context) !void {
+        const work = self.buffersFor(c.path).work orelse return;
+        if (c.hunk >= f.hunks.len) return;
+        c.above = try expand_mod.grow(arena, f, work, c.hunk, .up, c.above);
+        c.below = try expand_mod.grow(arena, f, work, c.hunk, .down, c.below);
     }
 
     fn contextFor(self: *Review, path: []const u8, hi: u32) !*Context {

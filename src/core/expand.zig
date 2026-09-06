@@ -321,3 +321,35 @@ test "growing a summarised file does nothing" {
     f.summarised = true;
     try testing.expectEqual(@as(u32, 0), try grow(a, f, work, 0, .up, 3));
 }
+
+test "a re-parse puts a grown file back to what git said" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const raw =
+        \\diff --git a/f.txt b/f.txt
+        \\--- a/f.txt
+        \\+++ b/f.txt
+        \\@@ -5 +5 @@
+        \\-five
+        \\+FIVE
+        \\
+    ;
+    var d = try parseOne(a, raw);
+    const work: Buffer = try .initOwned(a, try a.dupe(u8, eight));
+    const f = &d.files[0];
+    const was = f.lines.len();
+
+    _ = try grow(a, f, work, 0, .up, 3);
+    try testing.expect(f.lines.len() > was);
+
+    // What folding context back is built on: git's own answer, out of the
+    // output already in hand, with no second subprocess.
+    try testing.expect(try diff.reparse(a, f, raw));
+    try testing.expectEqual(was, f.lines.len());
+    try testing.expectEqual(@as(u32, 5), f.hunks[0].new_start);
+    try testing.expectEqual(@as(u32, 1), f.hunks[0].new_count);
+    try testing.expectEqual(@as(u32, 0), f.hunks[0].lo);
+    try testing.expectEqual(@as(u32, 2), f.hunks[0].hi);
+}
