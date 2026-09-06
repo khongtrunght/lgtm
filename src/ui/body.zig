@@ -16,6 +16,7 @@ const lexer = @import("../syntax/lexer.zig");
 const keytext = @import("keytext.zig");
 const search = @import("search.zig");
 const rows_mod = @import("rows.zig");
+const path_mod = @import("path.zig");
 const binary = @import("../core/binary.zig");
 const wrap = @import("wrap.zig");
 
@@ -154,6 +155,7 @@ fn drawRow(f: Frame, v: View, row: i32, r: rows_mod.Row, mark: Mark) Allocator.E
             break :blk;
         },
         .binary => try drawBinary(f, v, at),
+        .renamed => try drawRenamed(f, v, at),
         .hunk_header => |hi| try drawHunkHeader(f, v, at, hi),
         .line, .pair, .note => unreachable,
     }
@@ -180,6 +182,24 @@ fn drawBinary(f: Frame, v: View, at: u16) Allocator.Error!void {
     }
     if (info.size > 0) col += try f.print(at, 2 + col, f.theme.dim, " {s} {s}", .{ sep, size });
     if (info.gone) _ = try f.print(at, 2 + col, f.theme.dim, " {s} removed", .{sep});
+}
+
+/// Where a file came from. Git's own `{old => new}` spelling, because the two
+/// paths in full are mostly the same path twice and this is a pane that has
+/// half a window.
+///
+/// The line is elided from the head when it will not fit, for the reason the
+/// file list elides: the end of a path is the part that answers which file,
+/// and the braces sit as near the end as the difference allows.
+fn drawRenamed(f: Frame, v: View, at: u16) Allocator.Error!void {
+    const text = path_mod.moved(f.arena, v.file.old_path, v.file.new_path) catch return;
+    // The word, and not a glyph: the summary and binary rows next door say
+    // what they are in words too, and an icon set would need a fourth entry
+    // for something said once per file at most.
+    const room = f.width() -| 10;
+    if (room == 0) return;
+    const shown = try path_mod.elideFront(f.arena, text, room, f.glyphs.ellipsis, f.method());
+    _ = try f.print(at, 2, f.theme.dim, "moved  {s}", .{shown});
 }
 
 /// A note under the line it belongs to, indented past the gutter and wrapped

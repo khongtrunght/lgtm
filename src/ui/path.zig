@@ -19,6 +19,107 @@ const Allocator = std.mem.Allocator;
 
 const wrap = @import("wrap.zig");
 
+/// A move, written the way `git diff --stat` writes one:
+/// `src/{old => new}/thing.zig` rather than the two paths in full.
+///
+/// The common head and tail are what the reader already knows - they are
+/// looking at one file that went somewhere - so spending the pane on them
+/// twice says nothing. The braces hold what actually changed, which for the
+/// overwhelmingly common case is one directory name.
+///
+/// Both ends are cut at a '/', which is what makes the four shapes come out
+/// the way git's do, checked against git rather than guessed at:
+///
+///   src/old/thing.zig  -> src/new/thing.zig  ->  src/{old => new}/thing.zig
+///   src/ui/app.zig     -> src/app.zig        ->  src/{ui => }/app.zig
+///   src/thing.zig      -> src/other.zig      ->  src/{thing.zig => other.zig}
+///   a.txt              -> b.md               ->  a.txt => b.md
+///
+/// The third is why the tail is cut at a separator and not merely at the last
+/// matching byte: `thing.zig` and `other.zig` share `.zig`, and
+/// `src/{thing => other}.zig` claims a rename of the stem when what changed is
+/// the name. The fourth is why nothing shared means no braces - `{a => b}`
+/// around whole paths is the same two paths with punctuation added.
+/// `text` fitted into `max` columns by dropping whole segments off the
+/// *front*, the way `git diff --stat` shortens a move.
+///
+/// The opposite end from `elide`, and for a different job. A path is elided
+/// towards its name because the name answers "which file"; a move is elided
+/// towards its braces because the braces are the only part that is not already
+/// in the header above it - and a `{` with its `}` cut off reads as a bug
+/// rather than as a shortening.
+///
+/// Cut at separators so a directory name is never half shown. When even the
+/// last segment will not fit there is nothing structural left to protect, so
+/// it defers to `elide`.
+pub fn elideFront(
+    arena: Allocator,
+    text: []const u8,
+    max: u16,
+    ell: []const u8,
+    method: wrap.Metrics,
+) Allocator.Error![]const u8 {
+    if (wrap.columns(text, method) <= max) return text;
+    const ell_w = wrap.columns(ell, method);
+    if (max <= ell_w) return elide(arena, text, max, ell, method);
+
+    var at: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, text, at, '/')) |slash| {
+        at = slash + 1;
+        if (ell_w + wrap.columns(text[at..], method) <= max) {
+            return std.fmt.allocPrint(arena, "{s}{s}", .{ ell, text[at..] });
+        }
+    }
+    return elide(arena, text, max, ell, method);
+}
+
+pub fn moved(arena: Allocator, old: []const u8, new: []const u8) Allocator.Error![]const u8 {
+    const head = commonHead(old, new);
+    const tail = commonTail(old, new);
+    if (head == 0 and tail == 0) {
+        return std.fmt.allocPrint(arena, "{s} => {s}", .{ old, new });
+    }
+    // The two ends can reach past each other when one path is a prefix of the
+    // other's directories - `src/ui/app.zig` against `src/app.zig` shares
+    // `src/` at the front and `/app.zig` at the back, which is more than the
+    // shorter path has. The middle is then empty on that side, which is
+    // exactly what git prints.
+    const old_mid = old[head..@max(head, old.len - tail)];
+    const new_mid = new[head..@max(head, new.len - tail)];
+    return std.fmt.allocPrint(arena, "{s}{{{s} => {s}}}{s}", .{
+        old[0..head],
+        old_mid,
+        new_mid,
+        old[old.len - tail ..],
+    });
+}
+
+/// Bytes the two share from the front, cut at the last '/' so a partial
+/// directory name is never left inside the braces: `src/older` and `src/old`
+/// share `src/o`, and `src/o{lder => ld}` reads as a typo.
+fn commonHead(a: []const u8, b: []const u8) usize {
+    const n = @min(a.len, b.len);
+    var i: usize = 0;
+    var cut: usize = 0;
+    while (i < n and a[i] == b[i]) : (i += 1) {
+        if (a[i] == '/') cut = i + 1;
+    }
+    return cut;
+}
+
+/// The same from the back, and zero when the shared tail holds no separator at
+/// all - two names in one directory differ over the whole name, extension
+/// included.
+fn commonTail(a: []const u8, b: []const u8) usize {
+    const n = @min(a.len, b.len);
+    var i: usize = 0;
+    var cut: usize = 0;
+    while (i < n and a[a.len - 1 - i] == b[b.len - 1 - i]) : (i += 1) {
+        if (a[a.len - 1 - i] == '/') cut = i + 1;
+    }
+    return cut;
+}
+
 /// `text` fitted into `max` display columns, keeping the file name.
 ///
 /// The head of the path is what gets spent: `apps/macos/…/Launcher/View.swift`
@@ -130,4 +231,59 @@ test "the ascii ellipsis is three columns and still fits" {
     defer testing.allocator.free(out);
     try testing.expect(std.mem.endsWith(u8, out, "LauncherView.swift"));
     try testing.expect(wrap.columns(out, test_method) <= 30);
+}
+
+test "a move reads the way git writes one" {
+    var a: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    // The common case: one directory changed.
+    try std.testing.expectEqualStrings(
+        "src/{old => new}/thing.zig",
+        try moved(arena, "src/old/thing.zig", "src/new/thing.zig"),
+    );
+    // Renamed in place. The shared `.zig` stays inside the braces: what
+    // changed is the name, not the stem, and git writes it this way too.
+    try std.testing.expectEqualStrings(
+        "src/{thing.zig => other.zig}",
+        try moved(arena, "src/thing.zig", "src/other.zig"),
+    );
+    // Moved up a level: the braces hold a directory on one side and nothing
+    // on the other, which is git's own answer for it.
+    try std.testing.expectEqualStrings(
+        "src/{ui => }/app.zig",
+        try moved(arena, "src/ui/app.zig", "src/app.zig"),
+    );
+    // Nothing shared: braces would only add punctuation.
+    try std.testing.expectEqualStrings(
+        "a.txt => b.md",
+        try moved(arena, "a.txt", "b.md"),
+    );
+    // A shared prefix that is not a whole directory name must not be split:
+    // `older` and `old` share `old`, and `src/o{lder => ld}/x` is nonsense.
+    try std.testing.expectEqualStrings(
+        "src/{older => old}/x.zig",
+        try moved(arena, "src/older/x.zig", "src/old/x.zig"),
+    );
+}
+
+test "a move too wide for the pane keeps its braces" {
+    var a: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    const text = "packages/frontend/src/{components/widgets => features/launcher}/View.tsx";
+    const cut = try elideFront(arena, text, 60, "…", test_method);
+
+    // Whole segments off the front, and both braces still there - which is
+    // what `elide` could not promise, because it protects the name instead.
+    try std.testing.expectEqualStrings(
+        "…src/{components/widgets => features/launcher}/View.tsx",
+        cut,
+    );
+    try std.testing.expect(std.mem.indexOfScalar(u8, cut, '}') != null);
+
+    // Already short enough: returned untouched, not copied and shortened.
+    try std.testing.expectEqualStrings(text, try elideFront(arena, text, 200, "…", test_method));
 }

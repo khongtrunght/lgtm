@@ -318,6 +318,11 @@ hidden there, so it goes when they meet. `zc` folds the context of the hunk
 under the cursor back again, the way it closes a fold in vim; the other hunks
 keep theirs, and `zf` folds the lot.
 
+A file that moved says so above its diff, in git's own spelling:
+`moved  src/{old => new}/thing.zig`. A move with no edit in it has nothing else
+to draw, and a path in the header is only ever where the file ended up — so
+without that row an empty body is all you would see.
+
 A file that is not text - an image, a binary, an archive - never renders its
 bytes. It gets one row saying what it is, how big it is, and for an image how
 large: `PNG image | 1200x630 | 8.5 KB`.

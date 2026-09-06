@@ -54,6 +54,13 @@ pub const Row = union(enum) {
     /// The file is not text. One row saying what it is instead of a screen of
     /// its bytes; `FileDiff.bin` holds what the row draws.
     binary,
+    /// The file moved. Drawn above whatever else it has, because a rename with
+    /// no edit in it has nothing else at all - and an empty body under a path
+    /// that is simply the new one leaves the reader unable to tell a move from
+    /// a file that lost its contents.
+    ///
+    /// `FileDiff.old_path` and `new_path` are what it draws.
+    renamed,
 };
 
 pub const Rows = struct {
@@ -322,6 +329,11 @@ pub fn buildWith(
         return b.finish();
     }
 
+    // Above the hunks, and on its own when there are none. A move with edits
+    // in it is still a move, and the header only ever shows where the file
+    // ended up.
+    if (f.status == .renamed) try b.items.append(gpa, .renamed);
+
     for (f.hunks, 0..) |h, hi| {
         // The rule says lines are hidden here. Two hunks that context has
         // grown until they touch have none between them, and drawing it there
@@ -575,6 +587,55 @@ test "a summarised file is one row, not zero" {
     try testing.expectEqual(@as(u32, 1), rows.len());
     try testing.expect(rows.items[0] == .summarised);
     try testing.expect(rows.hunkAt(0) == null);
+}
+
+test "a move is a row, so a rename with no edit is not an empty screen" {
+    const gpa = testing.allocator;
+    var f = try fixture(gpa);
+    defer freeFixture(gpa, &f);
+
+    // A pure rename: git reports the paths and no hunks at all. Without a row
+    // of its own the body is empty under a header showing the new path, and
+    // nothing on screen tells a move from a file that lost its contents.
+    f.status = .renamed;
+    f.old_path = "src/old/a.zig";
+    f.new_path = "src/new/a.zig";
+    gpa.free(f.hunks);
+    f.hunks = &.{};
+    f.lines.deinit(gpa);
+    f.lines = .{};
+
+    var rows = try build(gpa, &f);
+    defer rows.deinit(gpa);
+    try testing.expectEqual(@as(u32, 1), rows.len());
+    try testing.expect(rows.items[0] == .renamed);
+    // Chrome: there is no line here to point an agent at.
+    try testing.expect(rows.lineAt(0) == null);
+
+    // Freed above; the fixture's own teardown must not free them twice.
+    f.hunks = try gpa.alloc(hunk.Hunk, 0);
+}
+
+test "a move with edits in it keeps its hunks, and says so first" {
+    const gpa = testing.allocator;
+    var f = try fixture(gpa);
+    defer freeFixture(gpa, &f);
+
+    f.status = .renamed;
+    f.old_path = "src/old/a.zig";
+    f.new_path = "src/new/a.zig";
+
+    var rows = try build(gpa, &f);
+    defer rows.deinit(gpa);
+
+    // The header only ever shows where the file ended up, so the move is
+    // announced above everything rather than left for the reader to notice.
+    try testing.expect(rows.items[0] == .renamed);
+    try testing.expect(rows.items[1] == .hunk_header);
+    try testing.expectEqual(@as(usize, 2), rows.hunk_rows.len);
+    // And the hunk rows still point at the headers after the shift.
+    try testing.expect(rows.items[rows.hunk_rows[0]] == .hunk_header);
+    try testing.expect(rows.items[rows.hunk_rows[1]] == .hunk_header);
 }
 
 test "a binary file is one row, not a screen of its bytes" {

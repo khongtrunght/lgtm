@@ -401,7 +401,10 @@ fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
             keytext.firstKeyFor(v.bindings, .next_fresh, .normal, &walk_key),
         }), t.accent }
     else
-        .{ try std.fmt.allocPrint(f.arena, "{d} rows", .{v.rows.len()}), t.dim };
+        .{ try std.fmt.allocPrint(f.arena, "{d} row{s}", .{
+            v.rows.len(),
+            if (v.rows.len() == 1) "" else "s",
+        }), t.dim };
 
     f.put(row, col, left, style);
     col += f.win.gwidth(left) + 2;
@@ -454,7 +457,12 @@ fn selectionSize(f: Frame, v: View, sel: Selection) Allocator.Error![]const u8 {
         const n = motion.graphemeCount(line[lo..hi]);
         return std.fmt.allocPrint(f.arena, "{d} character{s} selected", .{ n, if (n == 1) "" else "s" });
     }
-    return std.fmt.allocPrint(f.arena, "{d} lines selected", .{sel.count()});
+    // `V` on one line is a linewise selection of one, and reaches here.
+    const lines = sel.count();
+    return std.fmt.allocPrint(f.arena, "{d} line{s} selected", .{
+        lines,
+        if (lines == 1) "" else "s",
+    });
 }
 
 /// The longest prefix of the hint strip that fits `cols`.
