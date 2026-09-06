@@ -412,6 +412,7 @@ A second `,` keeps going back rather than turning round, the way vim's does.
 | `\|` or `-` | side by side, or back to the flow view |
 | `H` `L` | side by side: focus the old or the new column |
 | `zi` | show the files `[review] ignore` hides |
+| `<Space>t` | pick the pane sends go to |
 | `zo` | open a file too large to render inline |
 | `zc` | fold this hunk's context back, or a file opened with `zo` |
 | `zf` | fold every hunk's context in this file |
@@ -513,10 +514,22 @@ load-buffer` instead, so this should not happen; if it does, check that `tmux`
 is on your `PATH`.
 
 **Nothing is sent to the agent** — `lgtm` needs to know which pane your agent is
-in. It infers the only other one; with more than two it will say so rather than
-guess. Start it with `--pane` to be explicit: `%3` in tmux, `w1:p1` in herdr,
-`3` in WezTerm and kitty. kitty calls its splits *windows* rather than panes, and `lgtm` says so
-too — the flag is still `--pane`, because it is one flag.
+in. It infers the only other one; with more than two it will not guess. Instead
+it copies your text to the clipboard, so nothing is lost, and opens a list of
+every pane it can see — id, where it is, what is running there, and the title,
+which is where most agents write what they are working on. Type to narrow it,
+`<CR>` to connect. Picking one also sends whatever was waiting, so the
+keystroke that opened the list is the one that finishes.
+
+`<Space>t` opens the same list on purpose, which is how you point `lgtm` at a
+different agent without restarting it. `--pane` still works and is what you
+want in a script: `%3` in tmux, `w1:p1` in herdr, `3` in WezTerm and kitty.
+kitty calls its splits *windows* rather than panes, and `lgtm` says so too —
+the flag is still `--pane`, because it is one flag.
+
+Only tmux fills in the extra columns today; the others list ids, which is all
+they report. Ghostty has no per-pane id at all, so there is nothing to pick
+between — it sends to the focused split.
 
 **kitty says `set allow_remote_control yes`** — kitty refuses to let any process
 type into your terminal until you allow it. Put `allow_remote_control yes` in

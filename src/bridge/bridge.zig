@@ -291,6 +291,63 @@ pub const Bridge = union(enum) {
     /// Inference runs once per backend and per death. Three panes cannot be
     /// guessed at, and re-listing on every keystroke to fail the same way is a
     /// subprocess per keystroke.
+    /// One row of the picker: everything known about a pane a send could go
+    /// to. Only tmux fills more than `id` today - the other backends list ids
+    /// and nothing else - and a row is drawn from whatever is there.
+    pub const Candidate = struct {
+        id: []const u8,
+        command: []const u8 = "",
+        where: []const u8 = "",
+        title: []const u8 = "",
+    };
+
+    /// Every pane a send could go to, ourselves excluded.
+    ///
+    /// What inference refuses to choose between, handed to the reader instead.
+    /// `soleOther` declines past two panes because a wrong guess types into
+    /// somebody's editor - but declining is only the right answer for a
+    /// *machine*, and this is the same listing with the choice given back.
+    ///
+    /// Every session, not the current window: the reason to open this is that
+    /// the near scope had nothing in it.
+    pub fn candidates(self: *Bridge, cx: Ctx, arena: Allocator) Allocator.Error![]Candidate {
+        const p = self.panes() orelse return &.{};
+        const mine = p.selfPane();
+        var out: std.ArrayList(Candidate) = .empty;
+
+        switch (self.*) {
+            .tmux => {
+                const listed = tmux.list(cx.gpa, arena, cx.io, true) catch return &.{};
+                for (listed) |one| {
+                    if (mine.len > 0 and std.mem.eql(u8, one.id, mine)) continue;
+                    try out.append(arena, .{
+                        .id = one.id,
+                        .command = one.command,
+                        .where = one.where,
+                        .title = one.title,
+                    });
+                }
+            },
+            inline .herdr, .wezterm, .kitty => |_, tag| {
+                const mod = switch (tag) {
+                    .herdr => herdr,
+                    .wezterm => wezterm,
+                    .kitty => kitty,
+                    else => unreachable,
+                };
+                const ids = mod.list(cx.gpa, arena, cx.io) catch return &.{};
+                for (ids) |id| {
+                    if (mine.len > 0 and std.mem.eql(u8, id, mine)) continue;
+                    try out.append(arena, .{ .id = id });
+                }
+            },
+            // Ghostty has no per-pane id to list or to pick between: a send
+            // goes to whichever split is focused. Nothing to show.
+            .ghostty, .osc52 => {},
+        }
+        return out.toOwnedSlice(arena);
+    }
+
     fn target(self: *Bridge, cx: Ctx) Allocator.Error!?[]const u8 {
         const p = self.panes() orelse return null;
         if (p.pane()) |chosen| return chosen;
