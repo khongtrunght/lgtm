@@ -943,6 +943,7 @@ const python_lang = @import("lang/python.zig");
 const swift_lang = @import("lang/swift.zig");
 const java_lang = @import("lang/java.zig");
 const c_lang = @import("lang/c.zig");
+const cpp_lang = @import("lang/cpp.zig");
 const lua_lang = @import("lang/lua.zig");
 const javascript_lang = @import("lang/javascript.zig");
 const typescript_lang = @import("lang/typescript.zig");
@@ -1421,6 +1422,50 @@ test "a c call two lines above a block is not a declaration" {
     // One line of slack and no more: the bare block is two lines below the
     // call, and `setup` must not have claimed it.
     try testing.expectEqualStrings("caller", st.enclosingFn(5).?.name);
+}
+
+test "c++ adds its vocabulary to c and names a class" {
+    const src =
+        \\#include <vector>
+        \\
+        \\namespace app {
+        \\
+        \\class Tile : public Shape {
+        \\public:
+        \\    explicit Tile(std::string name) : name_(std::move(name)) {}
+        \\
+        \\    bool pressable() const noexcept
+        \\    {
+        \\        return !name_.empty();
+        \\    }
+        \\
+        \\private:
+        \\    std::string name_;
+        \\};
+        \\
+        \\}  // namespace app
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&cpp_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    // Inherited from C.
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "#include").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "bool").?);
+    // Added by C++.
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "namespace").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "explicit").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "noexcept").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "std").?);
+
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+    try testing.expectEqualStrings("Tile", st.enclosingFn(5).?.name);
+    // A method wins over the class it is in, brace on its own line and all.
+    try testing.expectEqualStrings("pressable", st.enclosingFn(10).?.name);
 }
 
 test "css hyphenated properties survive as one word" {
