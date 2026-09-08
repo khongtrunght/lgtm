@@ -81,6 +81,17 @@ pub const Glyphs = struct {
     /// "several of these" rather than as one more of them.
     run_mark: []const u8,
 
+    /// A pane running something that is not a shell, an editor or a pager -
+    /// the only evidence there is that it holds an agent.
+    ///
+    /// An asterisk in both sets, where a dot would look better: the mark is
+    /// part of the row's text, so `*` narrows the list to the agents and a
+    /// glyph nobody can type could not.
+    agent_mark: []const u8,
+
+    /// The pane sends currently go to.
+    target_mark: []const u8,
+
     ellipsis: []const u8,
 
     /// Whether this set has per-filetype icons to go with it. Only the nerd
@@ -124,6 +135,8 @@ pub const Glyphs = struct {
         .revert_mark = "\u{21ba}",
         .answer_mark = "  \u{21a9}",
         .run_mark = "\u{28ff}",
+        .agent_mark = "*",
+        .target_mark = "\u{25b8}",
         .ellipsis = "\u{2026}",
         // The README's banner. The thumb overhangs the last column of the
         // `M` rather than being centred under it, which is where it sits in
@@ -176,6 +189,8 @@ pub const Glyphs = struct {
         .revert_mark = "<-",
         .answer_mark = "  re:",
         .run_mark = "#",
+        .agent_mark = "*",
+        .target_mark = ">",
         .ellipsis = "...",
         // No block elements and no emoji: the set exists for the terminal
         // that would draw both as tofu.

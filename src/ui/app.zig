@@ -341,6 +341,10 @@ pub const App = struct {
     /// Soft wrap, from `ui.wrap` and toggled by `zw`. On, a line wider than
     /// the pane continues on the next screen row; off, it is cut at the edge.
     wrap: bool = true,
+    /// `[ui] preview`. Held here for the reason `wrap` is: this is the value
+    /// in force, not the one on disk. Named for the panel, not for `preview`
+    /// above it, which is a file read outside the review.
+    list_preview: bool = true,
     /// `[diff] layout`. `|` overrides it for the session by writing an
     /// explicit value here, which is what "manual wins over auto" is.
     layout: config.Layout = .auto,
@@ -1024,6 +1028,8 @@ pub const App = struct {
                 // from the keymap, so a remap moves them.
                 self.file_list.extra_keys = self.commentListKeys(self.pick_arena.allocator());
                 self.file_list.open(0);
+                // After `open`, which restores the default.
+                self.file_list.max_share = picker_share;
                 self.mode = .finder;
             },
             .comment_send => try self.commentSend(),
@@ -1238,6 +1244,7 @@ pub const App = struct {
                 self.file_list.totals = null;
                 self.file_list.extra_keys = &.{};
                 self.file_list.open(0);
+                self.file_list.max_share = picker_share;
                 self.mode = .finder;
             },
             // One set of list keys, two overlays. Which one they move is the
@@ -1358,9 +1365,122 @@ pub const App = struct {
     /// an unchanged file to an agent is the whole point of `@`, and the file
     /// you are looking at is the one you are most likely to name.
     /// One row of the pane picker, in this file's own vocabulary. The loop
-    /// composes these from whatever its bridge knows: `ui/app.zig` never sees
-    /// a multiplexer, and a picker is not the place to start.
-    pub const PaneRow = struct { id: []const u8, label: []const u8 };
+    /// fills these from whatever its bridge knows: `ui/app.zig` never sees a
+    /// multiplexer. The fields are the parts, not a finished line - ordering
+    /// and column widths are decisions about a list.
+    pub const PaneRow = struct {
+        id: []const u8,
+        /// Where the pane is, in whatever the multiplexer calls places.
+        where: []const u8 = "",
+        /// What it is running.
+        command: []const u8 = "",
+        /// What it calls itself. Last, and unpadded: it is a sentence, and it
+        /// is the field worth the leftover width.
+        title: []const u8 = "",
+        /// Which group the row belongs to. Rows sharing one stay together.
+        session: []const u8 = "",
+        /// That group is the one lgtm is running in.
+        here: bool = false,
+        /// Running something that is not a shell, an editor or a pager.
+        agent: bool = false,
+        /// Sends already go here.
+        target: bool = false,
+        /// What the pane is showing, for the panel beside the list.
+        preview: []const u8 = "",
+    };
+
+    /// Which row the list marks as "you are here", or none. `file_index` is
+    /// a fact about a list of files; on any other list it marks whatever row
+    /// landed at that index, and argues with the cursor.
+    pub fn listCurrent(self: *const App) u32 {
+        return switch (self.files_purpose) {
+            .jump, .mention, .browse => self.file_index,
+            .comments, .turns, .panes => std.math.maxInt(u32),
+        };
+    }
+
+    /// The location column's ceiling: padding to the widest made every row
+    /// pay for the longest session name. Fourteen holds `session:W.P` for a
+    /// session named after a repository.
+    ///
+    /// The head goes, not the tail: `:window.pane` tells the rows of one
+    /// session apart, and the session repeats down the group anyway.
+    const pane_where_max: usize = 14;
+
+    /// Lines of a file's diff kept for its panel, and the bytes they may not
+    /// exceed. Twenty is what `popup.preview_rows_beside` draws, as a number
+    /// rather than an import: `ui/app.zig` must not reach into the renderer.
+    /// Every file gets one, so the two together bound a large review.
+    const preview_lines: usize = 20;
+    const preview_bytes: usize = 1536;
+
+    /// The head of a file's section of the raw `git diff`, from its first
+    /// `@@`.
+    ///
+    /// A slice and a copy, not a render: `raw_lo`/`raw_hi` already bound the
+    /// text. Copied because `raw` lives in the review's arena, which every
+    /// re-diff resets, and this list outlives one. From the first `@@`
+    /// because the four header lines above it repeat the row.
+    pub fn diffHead(arena: Allocator, raw: []const u8, f: diff.FileDiff) []const u8 {
+        if (f.raw_hi <= f.raw_lo or f.raw_hi > raw.len) return "";
+        const sect = raw[f.raw_lo..f.raw_hi];
+        var at: usize = 0;
+        while (at < sect.len) {
+            const nl = std.mem.indexOfScalarPos(u8, sect, at, '\n') orelse sect.len;
+            if (std.mem.startsWith(u8, sect[at..], "@@")) break;
+            at = nl + 1;
+        }
+        if (at >= sect.len) at = 0; // no hunk header: a rename, a mode change
+
+        var end = at;
+        var lines: usize = 0;
+        while (end < sect.len and lines < preview_lines and end - at < preview_bytes) {
+            const nl = std.mem.indexOfScalarPos(u8, sect, end, '\n') orelse sect.len;
+            end = @min(nl + 1, sect.len);
+            lines += 1;
+        }
+        return arena.dupe(u8, sect[at..end]) catch "";
+    }
+
+    /// Whether a list may draw the panel beside it at all.
+    fn previews(self: *const App) bool {
+        return self.list_preview;
+    }
+
+    /// The most of the pane a box with a panel in it may take. These lists
+    /// are opened from the middle of a hunk to answer something about that
+    /// hunk, and a box covering the hunk hides it. What does not fit scrolls.
+    ///
+    /// Eighty and not seventy: a stacked panel spends nine rows before the
+    /// list gets any, and seventy left six of sixteen panes on screen.
+    const picker_share: u8 = 80;
+
+    fn shortWhere(arena: Allocator, where: []const u8, ell: []const u8, ell_w: usize) Allocator.Error![]const u8 {
+        // ASCII from the multiplexer, so bytes are columns.
+        if (where.len <= pane_where_max) return where;
+        const colon = std.mem.lastIndexOfScalar(u8, where, ':') orelse where.len;
+        const tail = where[colon..];
+        if (tail.len + ell_w + 1 > pane_where_max) return where[0..pane_where_max];
+        return std.fmt.allocPrint(arena, "{s}{s}{s}", .{
+            where[0 .. pane_where_max - tail.len - ell_w],
+            ell,
+            tail,
+        });
+    }
+
+    /// Our own session first, then the others by name, then agents ahead of
+    /// shells inside each, then the order the multiplexer gave.
+    ///
+    /// Grouping outranks agent-ness: a session is how a reader knows *which*
+    /// agent, and sorting every agent to the top scatters the panes of one
+    /// piece of work.
+    fn paneBefore(_: void, a: PaneRow, b: PaneRow) bool {
+        if (a.here != b.here) return a.here;
+        const by_name = std.mem.order(u8, a.session, b.session);
+        if (by_name != .eq) return by_name == .lt;
+        if (a.agent != b.agent) return a.agent;
+        return false;
+    }
 
     /// Opens the picker over a list the loop has already gathered.
     ///
@@ -1376,28 +1496,89 @@ pub const App = struct {
         _ = self.pick_arena.reset(.retain_capacity);
         const arena = self.pick_arena.allocator();
 
-        for (rows) |r| {
-            // Copied for the reason the comment labels are: this list is read
-            // on every keystroke of the filter, and whatever the loop built it
-            // from is gone by then.
-            const label = try arena.dupe(u8, r.label);
+        const ordered = try arena.dupe(PaneRow, rows);
+        // Insertion, not pdq: the last tiebreak is the multiplexer's own
+        // order, which only a stable sort keeps. Tens of rows either way.
+        std.sort.insertion(PaneRow, ordered, {}, paneBefore);
+
+        // Padded to the widest of each so the eye runs down a column. Every
+        // field but the last is ASCII from a multiplexer, so bytes are
+        // columns; the last is a sentence and is last so it is never measured.
+        // Shortened first, then measured: the widest of what is drawn. The id
+        // stands in where a backend reports nothing else - WezTerm, kitty and
+        // herdr list ids, and a row built from the rest would be blank.
+        const ell = self.glyphs.ellipsis;
+        const ell_w = wrap_mod.columns(ell, .{ .method = .unicode });
+        const wheres = try arena.alloc([]const u8, ordered.len);
+        var w_where: usize = 0;
+        for (ordered, wheres) |r, *w| {
+            w.* = try shortWhere(arena, if (r.where.len > 0) r.where else r.id, ell, ell_w);
+            w_where = @max(w_where, wrap_mod.columns(w.*, .{ .method = .unicode }));
+        }
+
+        var at: usize = 0;
+        for (ordered, 0..) |r, i| {
+            // Two states, two columns. Sharing one hid the agent that is
+            // already the target from a `*` filter.
+            const target = if (r.target) self.glyphs.target_mark else " ";
+            const agent = if (r.agent) self.glyphs.agent_mark else " ";
+            // One column for what the pane is, not two: on an agent row the
+            // command is noise beside the mark, and on a shell row the title
+            // is the terminal's default and the same on every one.
+            const what = if (r.agent and r.title.len > 0) r.title else r.command;
+            // No id: it names a pane to the multiplexer and to nobody else,
+            // and is never typed. It survives in `detail`, for `--pane`.
+            const shown_where = wheres[i];
+            const where_w = wrap_mod.columns(shown_where, .{ .method = .unicode });
+            const label = try std.fmt.allocPrint(arena, "{s}{s} {s}{s}  {s}", .{
+                target,
+                agent,
+                shown_where,
+                pad(arena, w_where -| where_w),
+                what,
+            });
+            // Only what the row does not already say: a backend with nothing
+            // but an id has it in the row, and would open a panel to repeat it.
+            const detail = if (r.where.len > 0)
+                try std.fmt.allocPrint(arena, "{s}  {s}  {s}", .{ r.id, r.where, r.command })
+            else
+                "";
             const id = try arena.dupe(u8, r.id);
             try self.pane_ids.append(self.gpa, id);
             try self.pick_list.append(self.gpa, .{
-                .path = label,
+                // Or the row ends in padding aligning a column nothing
+                // follows.
+                .path = std.mem.trimEnd(u8, label, " "),
                 .added = 0,
                 .removed = 0,
                 .in_review = false,
                 .plain = true,
+                .detail = if (self.previews()) detail else "",
+                .preview = if (self.previews()) try arena.dupe(u8, r.preview) else "",
+                .preview_kind = .log,
             });
+            if (r.target) at = i;
         }
 
         self.pending_send = if (pending) |t| try arena.dupe(u8, t) else null;
         self.file_list.title = " panes ";
         self.file_list.totals = null;
         self.file_list.extra_keys = &.{};
-        self.file_list.open(0);
+        // On the pane sends already go to, so reconnecting is a confirmation
+        // rather than a search. Otherwise the top, which the ordering has
+        // made the likeliest answer.
+        self.file_list.open(at);
+        // No row here is a file, so the icon and mark columns are blank.
+        self.file_list.gutter = false;
+        self.file_list.max_share = picker_share;
         self.mode = .finder;
+    }
+
+    /// `n` spaces, from the pick arena.
+    fn pad(arena: Allocator, n: usize) []const u8 {
+        const buf = arena.alloc(u8, n) catch return "";
+        @memset(buf, ' ');
+        return buf;
     }
 
     /// `<CR>` in the picker: connect to that pane, and send what was waiting.
@@ -1448,6 +1629,8 @@ pub const App = struct {
                 .added = f.added,
                 .removed = f.removed,
                 .status = f.status,
+                .preview = if (self.previews()) diffHead(arena, self.review.raw(), f) else "",
+                .preview_kind = .diff,
             }) catch return;
         }
         if (self.files_purpose == .comments) {
@@ -1462,16 +1645,34 @@ pub const App = struct {
                 // A stale or already-sent comment has no dot on screen - one
                 // points at code that moved, the other has been handed over -
                 // so a list showing four when two are visible has to say why.
-                const label = switch (n.state) {
-                    .open => std.fmt.allocPrint(arena, "{s}:{d}  {s}", .{ n.path, n.line, body }),
-                    .sent => std.fmt.allocPrint(arena, "{s}:{d}  [sent] {s}", .{ n.path, n.line, body }),
-                    .stale => std.fmt.allocPrint(arena, "{s}:{d}  [stale] {s}", .{ n.path, n.line, body }),
-                } catch continue;
+                const mark = switch (n.state) {
+                    .open => "",
+                    .sent => "[sent] ",
+                    .stale => "[stale] ",
+                };
+                const label = std.fmt.allocPrint(arena, "{s}:{d}  {s}{s}", .{
+                    n.path, n.line, mark, body,
+                }) catch continue;
+                // The row keeps the flattened body: the filter reaches only
+                // what the label holds. The panel gets the remark as written -
+                // `flatten` and the buffer above it cut a paragraph to a
+                // first sentence.
+                const detail = std.fmt.allocPrint(arena, "{s}:{d}  {s}", .{
+                    n.path, n.line, mark,
+                }) catch continue;
                 self.pick_list.append(self.gpa, .{
                     .path = label,
                     .added = 0,
                     .removed = 0,
                     .in_review = false,
+                    // The label is composed: the icon comes from the file
+                    // rather than from it, and the row is clipped rather than
+                    // elided towards a name it does not end with.
+                    .icon_path = n.path,
+                    .detail = if (self.previews()) std.mem.trimEnd(u8, detail, " ") else "",
+                    // Copied for the reason the label is: the store is edited
+                    // and deleted from while the list is open.
+                    .preview = if (self.previews()) arena.dupe(u8, n.body) catch "" else "",
                 }) catch return;
             }
             return;
@@ -1531,6 +1732,8 @@ pub const App = struct {
             self.file_list.totals = self.reviewTotals();
             self.file_list.extra_keys = &.{};
             self.file_list.open(files_mod.rowOf(self.pick_list.items, self.file_index));
+            // A panel costs rows; same ceiling as the other lists with one.
+            self.file_list.max_share = picker_share;
             self.mode = .finder;
         }
     }
@@ -2255,31 +2458,284 @@ pub const App = struct {
         defer fx.deinit();
 
         const rows = [_]App.PaneRow{
-            .{ .id = "%1", .label = "%1  a:1.0  zsh  shell" },
-            .{ .id = "%7", .label = "%7  a:2.0  claude  reviewing the diff" },
+            .{ .id = "%1", .where = "a:1.0", .command = "zsh", .title = "shell", .session = "a" },
+            .{
+                .id = "%7",
+                .where = "a:2.0",
+                .command = "claude",
+                .title = "reviewing the diff",
+                .session = "a",
+                .agent = true,
+            },
         };
         try fx.app.openPanePicker(&rows, "#3 src/main.zig:12");
 
         try testing.expectEqual(event.Mode.finder, fx.app.mode);
         try testing.expectEqual(@as(usize, 2), fx.app.pick_list.items.len);
-        try testing.expectEqualStrings("%7  a:2.0  claude  reviewing the diff", fx.app.pick_list.items[1].path);
+        // The agent leads its session, and the ids move with the rows.
+        try testing.expectEqualStrings("%7", fx.app.pane_ids.items[0]);
+        try testing.expectEqualStrings("%1", fx.app.pane_ids.items[1]);
         // Rows are labels, not paths: no filetype icon is guessed from one.
         try testing.expect(fx.app.pick_list.items[1].plain);
 
         // Picking asks the loop for two things at once, which is the point:
         // connect, and deliver what the failed send was carrying.
-        fx.app.pickPane(1);
+        fx.app.pickPane(0);
         try testing.expectEqualStrings("%7", fx.app.want_target.?);
         try testing.expectEqual(App.Delivery.send, fx.app.want_send.?);
         try testing.expectEqualStrings("#3 src/main.zig:12", fx.app.outgoing.items);
         try testing.expectEqual(event.Mode.normal, fx.app.mode);
     }
 
+    test "the picker groups by session, ours first, agents leading each" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        // Handed in the order tmux lists them, which is by session name: the
+        // one we are in is in the middle of it.
+        const rows = [_]App.PaneRow{
+            .{ .id = "%566", .where = "look:1.0", .command = "2.1.261", .session = "look", .agent = true },
+            .{ .id = "%665", .where = "look:4.0", .command = "zsh", .session = "look" },
+            .{ .id = "%645", .where = "lgtm:2.0", .command = "zsh", .session = "lgtm", .here = true },
+            .{ .id = "%667", .where = "lgtm:4.0", .command = "zsh", .session = "lgtm", .here = true },
+            .{ .id = "%604", .where = "lgtm:1.0", .command = "2.1.263", .session = "lgtm", .here = true, .agent = true },
+            .{ .id = "%540", .where = "setting:1.0", .command = "zsh", .session = "setting" },
+        };
+        try fx.app.openPanePicker(&rows, null);
+
+        const want = [_][]const u8{ "%604", "%645", "%667", "%566", "%665", "%540" };
+        for (want, 0..) |id, i| try testing.expectEqualStrings(id, fx.app.pane_ids.items[i]);
+    }
+
+    test "a pane row is padded into columns and marked" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        const rows = [_]App.PaneRow{
+            .{ .id = "%604", .where = "lgtm:1.0", .command = "2.1.263", .session = "lgtm", .agent = true, .title = "JSON highlighting" },
+            .{ .id = "%7", .where = "lgtm:12.0", .command = "zsh", .title = "kunkka07xx", .session = "lgtm" },
+        };
+        try fx.app.openPanePicker(&rows, null);
+
+        // Padded, so the last column starts in the same place on every row:
+        // the agent's title, the shell's command. No id - it moved to
+        // `detail`.
+        const first = try std.fmt.allocPrint(
+            testing.allocator,
+            " {s} lgtm:1.0   JSON highlighting",
+            .{fx.app.glyphs.agent_mark},
+        );
+        defer testing.allocator.free(first);
+        try testing.expectEqualStrings(first, fx.app.pick_list.items[0].path);
+        try testing.expectEqualStrings("   lgtm:12.0  zsh", fx.app.pick_list.items[1].path);
+        try testing.expectEqualStrings("%604  lgtm:1.0  2.1.263", fx.app.pick_list.items[0].detail);
+    }
+
+    test "what a pane is showing reaches the row that draws it" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        const rows = [_]App.PaneRow{.{
+            .id = "%604",
+            .where = "lgtm:1.0",
+            .command = "2.1.263",
+            .title = "JSON highlighting",
+            .session = "lgtm",
+            .agent = true,
+            .preview = "> waiting\n$ zig build test\n",
+        }};
+        try fx.app.openPanePicker(&rows, null);
+
+        // Owned by the pick arena, like the labels.
+        try testing.expectEqualStrings("> waiting\n$ zig build test\n", fx.app.pick_list.items[0].preview);
+        try testing.expectEqualStrings("%604  lgtm:1.0  2.1.263", fx.app.pick_list.items[0].detail);
+
+        // Empty by default, so every other list draws no panel.
+        const plain: render.FileEntry = .{ .path = "src/main.zig", .added = 0, .removed = 0 };
+        try testing.expectEqualStrings("", plain.preview);
+        try testing.expectEqualStrings("", plain.detail);
+    }
+
+    test "only a list of files marks a row as the one you are on" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        fx.app.files_purpose = .jump;
+        try testing.expectEqual(fx.app.file_index, fx.app.listCurrent());
+
+        // On a list of panes `file_index` names a file, and the row at that
+        // index is whichever pane landed there.
+        fx.app.files_purpose = .panes;
+        try testing.expectEqual(std.math.maxInt(u32), fx.app.listCurrent());
+    }
+
+    test "a long session name loses its head, not the pane it names" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        const rows = [_]App.PaneRow{
+            .{ .id = "%1", .where = "noah-tech-cl-v2:1.0", .command = "zsh", .session = "noah-tech-cl-v2" },
+            .{ .id = "%2", .where = "noah-tech-cl-v2:2.0", .command = "zsh", .session = "noah-tech-cl-v2" },
+        };
+        try fx.app.openPanePicker(&rows, null);
+
+        // Capped, and `:1.0` survives: it is what tells the two rows apart.
+        const e = fx.app.glyphs.ellipsis;
+        const want = try std.fmt.allocPrint(testing.allocator, "   noah-tech{s}:1.0  zsh", .{e});
+        defer testing.allocator.free(want);
+        try testing.expectEqualStrings(want, fx.app.pick_list.items[0].path);
+        // The whole of it is still one keystroke away, beside the list.
+        try testing.expectEqualStrings("%1  noah-tech-cl-v2:1.0  zsh", fx.app.pick_list.items[0].detail);
+    }
+
+    test "the agent mark survives being the target, so the filter still finds it" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        const rows = [_]App.PaneRow{
+            .{ .id = "%1", .where = "a:1.0", .command = "claude", .session = "a", .agent = true, .target = true },
+            .{ .id = "%2", .where = "a:2.0", .command = "claude", .session = "a", .agent = true },
+            .{ .id = "%3", .where = "a:3.0", .command = "zsh", .session = "a" },
+        };
+        try fx.app.openPanePicker(&rows, null);
+
+        const g = fx.app.glyphs;
+        // Two columns: where sends go, and whether it is an agent. Sharing
+        // one hid this row from a `*` filter.
+        try testing.expect(std.mem.startsWith(u8, fx.app.pick_list.items[0].path, g.target_mark));
+        for (fx.app.pick_list.items[0..2]) |row| {
+            try testing.expect(std.mem.indexOf(u8, row.path, g.agent_mark) != null);
+        }
+        try testing.expect(std.mem.indexOf(u8, fx.app.pick_list.items[2].path, g.agent_mark) == null);
+    }
+
+    test "a file row previews the head of its diff, not the header above it" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+        const arena = fx.app.pick_arena.allocator();
+
+        const raw =
+            "diff --git a/a.zig b/a.zig\n" ++
+            "index 1111111..2222222 100644\n" ++
+            "--- a/a.zig\n" ++
+            "+++ b/a.zig\n" ++
+            "@@ -1,3 +1,3 @@\n" ++
+            " const std = @import(\"std\");\n" ++
+            "-const old = 1;\n" ++
+            "+const new = 2;\n";
+        const f: diff.FileDiff = .{
+            .old_path = "a.zig",
+            .new_path = "a.zig",
+            .status = .modified,
+            .raw_lo = 0,
+            .raw_hi = raw.len,
+        };
+
+        // From the first `@@`: the four lines above it say what the row said.
+        const head = App.diffHead(arena, raw, f);
+        try testing.expect(std.mem.startsWith(u8, head, "@@ -1,3 +1,3 @@"));
+        try testing.expect(std.mem.indexOf(u8, head, "diff --git") == null);
+        try testing.expect(std.mem.indexOf(u8, head, "+const new = 2;") != null);
+
+        // A rename or a mode change has no hunk at all, and its own lines are
+        // then the only thing there is to show.
+        const bare = "diff --git a/a.zig b/b.zig\nsimilarity index 100%\n";
+        const none: diff.FileDiff = .{
+            .old_path = "a.zig",
+            .new_path = "b.zig",
+            .status = .renamed,
+            .raw_lo = 0,
+            .raw_hi = bare.len,
+        };
+        try testing.expect(std.mem.startsWith(u8, App.diffHead(arena, bare, none), "diff --git"));
+
+        // A file the parser never gave a range is not guessed at.
+        try testing.expectEqualStrings("", App.diffHead(arena, raw, .{
+            .old_path = "a.zig",
+            .new_path = "a.zig",
+            .status = .modified,
+        }));
+    }
+
+    test "previews can be turned off, and then no list builds one" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        _ = try fx.app.comments.add("src/net.zig", 47, "a remark");
+        fx.app.list_preview = false;
+        fx.app.files_purpose = .comments;
+        fx.app.buildPickList();
+
+        // Not merely hidden at draw time: nothing is copied into the arena
+        // either, which is the point of a setting rather than a branch in the
+        // renderer.
+        try testing.expectEqualStrings("", fx.app.pick_list.items[0].preview);
+        try testing.expectEqualStrings("", fx.app.pick_list.items[0].detail);
+        // The row itself is untouched: the label is what the filter reads.
+        try testing.expect(std.mem.indexOf(u8, fx.app.pick_list.items[0].path, "a remark") != null);
+    }
+
+    test "a comment keeps its whole remark for the panel beside the list" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        const body = "the retry loop here\nnever backs off, so a flapping\nhost gets hammered";
+        _ = try fx.app.comments.add("src/net.zig", 47, body);
+        fx.app.files_purpose = .comments;
+        fx.app.buildPickList();
+
+        const row = fx.app.pick_list.items[0];
+        // The row keeps the flattened body, because the filter reaches only
+        // what the label holds.
+        try testing.expect(std.mem.indexOf(u8, row.path, "src/net.zig:47") != null);
+        try testing.expect(std.mem.indexOfScalar(u8, row.path, '\n') == null);
+        // The panel gets it as it was written. `flatten` and its 256-byte
+        // buffer turned a paragraph into a first sentence with no way to read
+        // the rest.
+        try testing.expectEqualStrings(body, row.preview);
+        try testing.expectEqualStrings("src/net.zig:47", row.detail);
+    }
+
+    test "a backend that reports only ids still gets a list worth reading" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        // WezTerm, kitty and herdr answer ids and nothing else. Built from
+        // the fields they leave empty, every row was a blank line you could
+        // still press Enter on.
+        const rows = [_]App.PaneRow{ .{ .id = "1" }, .{ .id = "12" } };
+        try fx.app.openPanePicker(&rows, null);
+
+        try testing.expectEqualStrings("   1", fx.app.pick_list.items[0].path);
+        try testing.expectEqualStrings("   12", fx.app.pick_list.items[1].path);
+        // And no panel: the id is already in the row, so one saying it again
+        // would be a panel opened to repeat the list.
+        try testing.expectEqualStrings("", fx.app.pick_list.items[0].detail);
+        try testing.expectEqualStrings("", fx.app.pick_list.items[0].preview);
+    }
+
+    test "the picker opens on the pane sends already go to" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        const rows = [_]App.PaneRow{
+            .{ .id = "%1", .command = "zsh", .session = "a" },
+            .{ .id = "%2", .command = "zsh", .session = "a", .target = true },
+        };
+        try fx.app.openPanePicker(&rows, null);
+
+        // The marker takes the column an agent dot would have had, and the
+        // cursor starts there rather than at the top.
+        try testing.expect(std.mem.startsWith(u8, fx.app.pick_list.items[1].path, fx.app.glyphs.target_mark));
+        fx.app.pickPane(@intCast(fx.app.file_list.index));
+        try testing.expectEqualStrings("%2", fx.app.want_target.?);
+    }
+
     test "the picker opened by hand sends nothing" {
         var fx = try Fixture.init(testing.allocator);
         defer fx.deinit();
 
-        const rows = [_]App.PaneRow{.{ .id = "%2", .label = "%2  b:1.0  bash" }};
+        const rows = [_]App.PaneRow{.{ .id = "%2", .where = "b:1.0", .command = "bash", .session = "b" }};
         try fx.app.openPanePicker(&rows, null);
         fx.app.pickPane(0);
 
@@ -2293,7 +2749,7 @@ pub const App = struct {
         var fx = try Fixture.init(testing.allocator);
         defer fx.deinit();
 
-        const rows = [_]App.PaneRow{.{ .id = "%2", .label = "%2  b:1.0  bash" }};
+        const rows = [_]App.PaneRow{.{ .id = "%2", .where = "b:1.0", .command = "bash", .session = "b" }};
         try fx.app.openPanePicker(&rows, "text");
         fx.app.pickPane(null);
 
@@ -3241,6 +3697,7 @@ pub const App = struct {
                 self.file_list.totals = null;
                 self.file_list.extra_keys = &.{};
                 self.file_list.open(0);
+                self.file_list.max_share = picker_share;
                 self.mode = .finder;
             },
             .compose_send_now => try self.composeSendNow(body),

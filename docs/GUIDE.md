@@ -195,7 +195,7 @@ A dozen remarks is a dozen interruptions, or it is one file.
 | `<Space>c` | write a comment on this line — on removed code too |
 | `]c` `[c` | walk them |
 | `<Space>vc` | open the nearest one to read or edit |
-| `<Space>lc` | list every comment; the filter reaches the file, the line and the text |
+| `<Space>lc` | list every comment; the filter reaches the file, the line and the text, and the panel beside the list shows the one you are on as you wrote it |
 | `<Space>sc` | send just this one, now |
 | `<Space>dc` | delete the one here |
 | `<C-s>` | write `.lgtm/review-3.md` and tell the agent about it |
@@ -246,6 +246,11 @@ the source file. Two of the three signals are near-certain and lead; "fewer
 assertions" follows behind, because a refactor that merges two checks into one
 looks the same. Zig, Go, Python, JavaScript, TypeScript, Rust and Swift are
 described; anything else stays silent rather than guessing.
+
+Every list draws a panel beside what you are on - the file list shows the head
+of that file's diff, the comment list the remark as you wrote it, the pane
+picker the pane's own screen. It moves to the side in a wide pane and under the
+list in a narrow one, and `[ui] preview = false` turns it off.
 
 ### 6. Get your work back
 
@@ -521,10 +526,21 @@ is on your `PATH`.
 **Nothing is sent to the agent** — `lgtm` needs to know which pane your agent is
 in. It infers the only other one; with more than two it will not guess. Instead
 it copies your text to the clipboard, so nothing is lost, and opens a list of
-every pane it can see — id, where it is, what is running there, and the title,
-which is where most agents write what they are working on. Type to narrow it,
-`<CR>` to connect. Picking one also sends whatever was waiting, so the
-keystroke that opened the list is the one that finishes.
+every pane it can see. Type to narrow it, `<CR>` to connect. Picking one also
+sends whatever was waiting, so the keystroke that opened the list is the one
+that finishes.
+
+The list is grouped by session, your own session first, with the panes running
+something other than a shell at the top of each group and a `*` beside them.
+Type `*` to see only those. An arrow in the column before it marks the pane
+sends go to now, and the cursor starts there.
+
+Beside the list — under it in a narrow pane — is **the selected pane's own
+screen**. That is the part worth knowing about: `%604` identifies a pane to
+tmux and to nobody else, so the picker shows you what the pane is showing, and
+you recognise your agent by what it is saying rather than by its number. The
+whole list is captured in one call when the picker opens, so moving through it
+costs nothing. tmux only; the other multiplexers list ids and get no panel.
 
 `<Space>t` opens the same list on purpose, which is how you point `lgtm` at a
 different agent without restarting it. `--pane` still works and is what you
@@ -532,9 +548,9 @@ want in a script: `%3` in tmux, `w1:p1` in herdr, `3` in WezTerm and kitty.
 kitty calls its splits *windows* rather than panes, and `lgtm` says so too —
 the flag is still `--pane`, because it is one flag.
 
-Only tmux fills in the extra columns today; the others list ids, which is all
-they report. Ghostty has no per-pane id at all, so there is nothing to pick
-between — it sends to the focused split.
+Only tmux fills in the columns and the panel today; the others list ids, which
+is all they report. Ghostty has no per-pane id at all, so there is nothing to
+pick between — it sends to the focused split.
 
 **kitty says `set allow_remote_control yes`** — kitty refuses to let any process
 type into your terminal until you allow it. Put `allow_remote_control yes` in

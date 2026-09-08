@@ -43,6 +43,14 @@ pub const Files = struct {
     title: []const u8 = " files ",
     /// Keys this list adds to the shared footer.
     extra_keys: []const keytext.HelpEntry = &.{},
+    /// Whether the rows keep the two columns before them for the "you are
+    /// here" mark and the two after for a filetype icon. A list of panes has
+    /// neither, and they were four blank columns on every row. Set by whoever
+    /// opens the list rather than derived from the rows, so it cannot change
+    /// while the reader filters.
+    gutter: bool = true,
+    /// The most of the pane this list's box may take, as a percentage.
+    max_share: u8 = 100,
     /// The whole change, for the top border. Set by the caller that knows
     /// which list this is: a project browse or a comment list has no total
     /// worth drawing, and `null` is how they say so.
@@ -53,6 +61,11 @@ pub const Files = struct {
     pub fn open(self: *Files, at: usize) void {
         self.filter.start(.help_filter);
         self.index = at;
+        // Restored here, not set by each opener: the seventh opener would
+        // inherit whatever the last one left. A list wanting neither says so
+        // after opening.
+        self.gutter = true;
+        self.max_share = 100;
     }
 
     pub fn close(self: *Files) void {
@@ -139,6 +152,8 @@ pub const Files = struct {
             .entries = try entries(files, current, filter, arena),
             .title = self.title,
             .extra_keys = self.extra_keys,
+            .gutter = self.gutter,
+            .max_share = self.max_share,
             .query = filter,
             .index = self.index,
             .keys = try keytext.helpEntries(bindings, .finder, null, "", arena),

@@ -299,7 +299,42 @@ pub const Bridge = union(enum) {
         command: []const u8 = "",
         where: []const u8 = "",
         title: []const u8 = "",
+        /// The session this pane belongs to, so the picker can group by it.
+        /// Empty for a backend with no such notion.
+        session: []const u8 = "",
+        /// Whether that session is the one lgtm runs in. Decided here because
+        /// our own pane is filtered out below, and this is the last place it
+        /// can be seen.
+        same_session: bool = false,
+        /// What the pane is showing, which is the part a reader recognises.
+        /// Empty when the backend cannot capture one, and no panel is drawn.
+        preview: []const u8 = "",
     };
+
+    /// Panes that are certainly not an agent, by what they run.
+    ///
+    /// An exclusion list, not a list of agents: new agents ship every month
+    /// and new shells do not. Editors and pagers are here too - `nvim` in a
+    /// split is a pane a send must never land in. Being wrong costs a marker
+    /// and a sort position, never a misdirected send.
+    const not_agents: []const []const u8 = &.{
+        "ash",  "bash",     "csh",  "dash",  "elvish", "fish",  "ksh",  "nu",
+        "pwsh", "sh",       "tcsh", "xonsh", "zsh",    "emacs", "hx",   "helix",
+        "kak",  "micro",    "nano", "nvim",  "vi",     "vim",   "less", "man",
+        "more", "bat",      "btop", "htop",  "top",    "git",   "ssh",  "tmux",
+        "lgtm", "lgtm-dev",
+    };
+
+    /// Whether a pane is worth marking as an agent. The *absence* of a known
+    /// command: Claude Code reports its version as `pane_current_command`,
+    /// which no allowlist would have predicted.
+    pub fn looksLikeAgent(command: []const u8) bool {
+        if (command.len == 0) return false;
+        for (not_agents) |x| {
+            if (std.mem.eql(u8, command, x)) return false;
+        }
+        return true;
+    }
 
     /// Every pane a send could go to, ourselves excluded.
     ///
@@ -318,6 +353,15 @@ pub const Bridge = union(enum) {
         switch (self.*) {
             .tmux => {
                 const listed = tmux.list(cx.gpa, arena, cx.io, true) catch return &.{};
+                // Found before the pane it came from is dropped. Empty when
+                // tmux did not answer or the env var never named us, and then
+                // no group is current rather than the wrong one being it.
+                var my_session: []const u8 = "";
+                if (mine.len > 0) {
+                    for (listed) |one| {
+                        if (std.mem.eql(u8, one.id, mine)) my_session = one.session;
+                    }
+                }
                 for (listed) |one| {
                     if (mine.len > 0 and std.mem.eql(u8, one.id, mine)) continue;
                     try out.append(arena, .{
@@ -325,7 +369,20 @@ pub const Bridge = union(enum) {
                         .command = one.command,
                         .where = one.where,
                         .title = one.title,
+                        .session = one.session,
+                        .same_session = my_session.len > 0 and
+                            std.mem.eql(u8, one.session, my_session),
                     });
+                }
+
+                // One more subprocess for the whole list. Best effort: a
+                // picker with no previews still works.
+                var ids: std.ArrayList([]const u8) = .empty;
+                for (out.items) |c| ids.append(arena, c.id) catch break;
+                if (tmux.capture(cx.gpa, arena, cx.io, ids.items) catch null) |caps| {
+                    if (caps.len == out.items.len) {
+                        for (out.items, caps) |*c, text| c.preview = text;
+                    }
                 }
             },
             inline .herdr, .wezterm, .kitty => |_, tag| {
@@ -511,6 +568,27 @@ fn envWith(gpa: Allocator, pairs: []const [2][]const u8) !std.process.Environ.Ma
     var map: std.process.Environ.Map = .init(gpa);
     for (pairs) |p| try map.put(p[0], p[1]);
     return map;
+}
+
+test "an agent pane is the one running something a person would not leave open" {
+    // Claude Code reports its version as `pane_current_command`, which is why
+    // the test is an exclusion.
+    try testing.expect(Bridge.looksLikeAgent("2.1.263"));
+    try testing.expect(Bridge.looksLikeAgent("claude"));
+    try testing.expect(Bridge.looksLikeAgent("codex"));
+    try testing.expect(Bridge.looksLikeAgent("aider"));
+
+    try testing.expect(!Bridge.looksLikeAgent("zsh"));
+    try testing.expect(!Bridge.looksLikeAgent("bash"));
+    try testing.expect(!Bridge.looksLikeAgent("fish"));
+    // A send into someone's editor is what the picker exists to avoid.
+    try testing.expect(!Bridge.looksLikeAgent("nvim"));
+    try testing.expect(!Bridge.looksLikeAgent("less"));
+    // Ourselves in the other split.
+    try testing.expect(!Bridge.looksLikeAgent("lgtm"));
+
+    // A tmux too old to answer says nothing rather than guessing.
+    try testing.expect(!Bridge.looksLikeAgent(""));
 }
 
 test "outside a multiplexer the bridge is the clipboard" {
