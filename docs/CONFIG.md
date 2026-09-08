@@ -13,7 +13,7 @@ and shows the default, so the file changes nothing until you uncomment
 something; it never overwrites a file that already exists.
 
 The repository's wins where they disagree. `.lgtm/` is ignored by the
-`.gitignore` `lgtm` writes there, except `config.toml` — so a project can commit
+`.gitignore` `lgtm` writes there, except `config.toml`, so a project can commit
 its own settings without committing anyone's session state.
 
 **A bad setting never stops `lgtm` starting.** It is reported on the status line
@@ -108,7 +108,7 @@ being reviewed.
 | `wrap` | `true` | Soft wrap long lines. `zw` toggles it for the session. A wrapped code line's continuation rows start under the line's own indentation, so a run-on reads as one statement rather than as the start of a new one |
 | `icons` | `"unicode"` | `"nerd"`, `"unicode"` or `"ascii"`. Only `nerd` has filetype icons; `ascii` exists for a terminal that would draw the rest as tofu |
 | `comments` | `"marker"` | `"marker"` is the gutter dot alone; `"inline"` folds the comment text under the line it belongs to |
-| `compose` | `"bottom"` | `"bottom"`, `"top"` or `"centre"` — where the compose box opens |
+| `compose` | `"bottom"` | `"bottom"`, `"top"` or `"centre"`, where the compose box opens |
 | `tab_width` | `4` | Columns a tab is drawn as, 1 to 16. A tab advances to the next multiple of it, so a line aligned with tabs stays aligned. Four rather than eight because the pane this is built for is a split one, and Go or a Makefile indented at eight spends a third of it before the code starts |
 | `scroll_ms` | `250` | How long a jump takes to travel, up to 1000. `0` turns the animation off |
 | `cursor_ms` | `80` | The same for the cursor |
@@ -129,9 +129,9 @@ the rest keep their defaults.
 
 ```toml
 [templates]
-submit_review = "please review {path} — {count} note{s} waiting"
+submit_review = "please review {path}, {count} note{s} waiting"
 ref_single    = "look at {path} line {line}"
-ask_test      = "{ref} — a table test, not a unit test"
+ask_test      = "{ref}: a table test, not a unit test"
 ```
 
 | Key | Default | `{vars}` |
@@ -141,7 +141,7 @@ ask_test      = "{ref} — a table test, not a unit test"
 | `ref_span` | ``#{change_id} {path}:{line} `{span}` `` | plus `span`, the selected text |
 | `ref_hunk` | `#{change_id} {path}:{line} (deleted lines in this hunk)` | the cursor on a removed line, which the new file has no number for |
 | `ref_file` | `{path}` | a file too large to render inline, so there is no hunk to point at |
-| `ref_file_line` / `_range` / `_span` | `{path}:{line}` … | a file with no hunks at all — opened and read rather than reviewed, so no `#id` |
+| `ref_file_line` / `_range` / `_span` | `{path}:{line}` … | a file with no hunks at all, opened and read rather than reviewed, so no `#id` |
 | `submit_review` | `review ready: {path} ({count} comment{s})` | `path` `count` `s` |
 | `ask_why` `ask_revert` `ask_test` `ask_explain` | `{ref} - why this approach?` … | `ref`, whichever of the above the cursor produced |
 
@@ -149,7 +149,7 @@ ask_test      = "{ref} — a table test, not a unit test"
 It is a variable rather than a branch, because a template language with an `if`
 in it is a template language.
 
-**An unknown placeholder is left verbatim rather than dropped** — write
+**An unknown placeholder is left verbatim rather than dropped.** Write
 `{lines}` where the table offers `{line}` and you will see the typo in the
 message you just sent, instead of a silently shorter one. A key that is not a
 template is reported with its file and line, like any other config mistake.
@@ -185,7 +185,7 @@ are different questions. `.gitignore` is still respected.
 | `ignore` | Paths to keep out of the review |
 
 These are git pathspecs, passed to git as `:(exclude)`, so the glob semantics
-are `.gitignore`'s exactly — there is no matcher here to get subtly wrong. git
+are `.gitignore`'s exactly: there is no matcher here to get subtly wrong. git
 never parses the hunks either, so a 900-line lockfile costs nothing.
 
 What this is for is the file `.gitignore` *cannot* help with: the generated ones
@@ -196,8 +196,8 @@ that are tracked on purpose.
 ignore = ["package-lock.json", "**/*.pb.go", "dist/**"]
 ```
 
-Hidden files are counted on the status line — nothing is ever hidden silently —
-and `zi` reveals them.
+Hidden files are counted on the status line, so nothing is ever hidden
+silently, and `zi` reveals them.
 
 ## `[presets]`
 
@@ -322,7 +322,7 @@ way to check a spelling before committing it to a config file.
 `compose_presets` `compose_mention` `compose_newline`
 
 The box's keys are bindings like any others, but with two rules of their own.
-They must be **single chords** — a text box cannot hold a prefix while waiting
+They must be **single chords**: a text box cannot hold a prefix while waiting
 to see whether a sequence completes, because the next key is usually a letter
 you are typing. And a **pending operator wins**: with `d` waiting for a motion,
 `<Esc>` cancels the operator rather than the box.

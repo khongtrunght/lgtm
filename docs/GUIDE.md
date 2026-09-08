@@ -13,9 +13,9 @@ curl -fsSL https://raw.githubusercontent.com/kunkka19xx/lgtm/main/scripts/instal
 
 Any Linux distribution, and macOS; arm64 and x86_64. The Linux build is
 statically linked, so there is no libc to match and no distribution to be right
-about — this is the path on Debian, Ubuntu, Fedora, Alpine, openSUSE and
-anything else without an entry below. The script needs no sudo — one binary
-goes in `~/.local/bin` — and it will not install over a copy something else
+about. This is the path on Debian, Ubuntu, Fedora, Alpine, openSUSE and
+anything else without an entry below. The script needs no sudo (one binary
+goes in `~/.local/bin`) and it will not install over a copy something else
 manages. It verifies every download against the `SHA256SUMS` published in the
 same release and stops on a mismatch.
 
@@ -32,7 +32,7 @@ On macOS, from the tap:
 brew install kunkka19xx/tap/lgtm
 ```
 
-On Arch, from the AUR — with whichever helper you use, or none:
+On Arch, from the AUR, with whichever helper you use, or none:
 
 ```sh
 paru -S lgtm-bin     # or: yay -S lgtm-bin
@@ -49,7 +49,7 @@ nix run --refresh github:kunkka19xx/lgtm          # run it once, install nothing
 nix profile add --refresh github:kunkka19xx/lgtm  # keep it on PATH
 ```
 
-`nix run` builds into the store and runs it — nothing joins your profile or your
+`nix run` builds into the store and runs it: nothing joins your profile or your
 PATH, and the next `nix-collect-garbage` reclaims the build, so trying it costs
 nothing. `nix profile add` is the one that persists; `nix profile remove lgtm`
 undoes it. Both need flakes enabled. (`nix profile install` is the old spelling
@@ -57,7 +57,7 @@ of `add`, and warns.)
 
 `--refresh` belongs on both, first install included, and leaving it off is the
 one mistake worth warning about. Nix caches what a `github:` ref resolves to for
-an hour (`tarball-ttl`), and inside that window it never asks GitHub again — so
+an hour (`tarball-ttl`), and inside that window it never asks GitHub again, so
 without it a `nix run` can rebuild a revision that is already stale, and a later
 upgrade can hand you back the build you were trying to replace.
 
@@ -69,12 +69,12 @@ nix profile upgrade --refresh lgtm
 
 A profile entry is locked to the commit it was installed from, and `add` will
 not install over itself, so repeating the install line leaves the old entry
-exactly where it was — `--refresh` re-checks where the `github:` ref points,
+exactly where it was. `--refresh` re-checks where the `github:` ref points,
 not where your entry is pinned. `upgrade` re-resolves the URL the entry was
 added with and re-locks it. If your Nix named the entry something other than
 `lgtm`, `nix profile list` shows the name alongside the locked commit and the
-store path, which is also the quickest way to confirm that a stale entry — and
-not the release — is why `lgtm -v` still prints the old number.
+store path, which is also the quickest way to confirm that a stale entry, and
+not the release, is why `lgtm -v` still prints the old number.
 `nix profile remove lgtm` followed by the `add` line above does the same thing
 in two steps and always works.
 
@@ -84,7 +84,7 @@ does not change when the store path behind it does: run `rehash` (zsh) or
 `hash -r` (bash) in any long-lived pane, which is why a tmux session left open
 across the upgrade is usually the one still reporting the old version. And an
 `lgtm` already running keeps the binary it started with until you quit it.
-`readlink -f "$(which lgtm)"` settles it — the store hash changes on a real
+`readlink -f "$(which lgtm)"` settles it: the store hash changes on a real
 upgrade, whether or not `lgtm -v` does.
 
 No Windows build: `io/input.zig` and `io/tty.zig` are POSIX throughout, so that
@@ -134,7 +134,7 @@ lgtm --init --config .lgtm/config.toml   # this repository's, meant to be commit
 ```
 
 Every line in the file it writes is commented out and shows the default, so it
-changes nothing until you uncomment something — and a default improved in a
+changes nothing until you uncomment something, and a default improved in a
 later release still reaches you. `--init` never overwrites a file that is
 already there. [CONFIG.md](CONFIG.md) is the full reference.
 
@@ -172,7 +172,7 @@ walks the places `id` is used rather than stopping in every `width`, `valid` and
 #3 src/auth.zig:47
 ```
 
-Type what you want to say and `Enter` sends it — inserted into your agent's
+Type what you want to say and `Enter` sends it, inserted into your agent's
 input box, never submitted, so you decide when to press return.
 
 - `V` selects lines and sends `:47-52`; `v` selects inside a line and sends the
@@ -192,7 +192,7 @@ A dozen remarks is a dozen interruptions, or it is one file.
 
 | | |
 |---|---|
-| `<Space>c` | write a comment on this line — on removed code too |
+| `<Space>c` | write a comment on this line, on removed code too |
 | `]c` `[c` | walk them |
 | `<Space>vc` | open the nearest one to read or edit |
 | `<Space>lc` | list every comment; the filter reaches the file, the line and the text, and the panel beside the list shows the one you are on as you wrote it |
@@ -201,7 +201,7 @@ A dozen remarks is a dozen interruptions, or it is one file.
 | `<C-s>` | write `.lgtm/review-3.md` and tell the agent about it |
 
 Comments follow the code when the agent rewrites it, survive a restart, and say
-so when they can no longer be placed — a comment is never silently dropped.
+so when they can no longer be placed. A comment is never silently dropped.
 
 In the comment list, `<C-s>` sends the highlighted one, `<C-x>` sends every open
 one as the review file, `<C-d>` deletes one.
@@ -238,7 +238,7 @@ status line:
 1 test removed, 1 skip added, 1 fewer assertion
 ```
 
-`]w` and `[w` walk to them — to the removed declaration or the added skip, so
+`]w` and `[w` walk to them: to the removed declaration or the added skip, so
 you land on the thing rather than near it.
 
 Detected by content, not by path, so it works for languages that keep tests in
@@ -267,7 +267,7 @@ uncommitted work is invisible to git until you lose it.
 The list stays a screenful however long the session runs. The newest few turns
 are always drawn, and so are the mark, `0 original` and the turn you are
 looking at; everything between them collapses into `⋮ 13 turns`. `<CR>` opens a
-fold, and typing anything opens all of them — a filter that skipped folded rows
+fold, and typing anything opens all of them. A filter that skipped folded rows
 would be a filter that lies.
 
 Four turns in a row on one file collapse too, as `⣿ 1-4 app.zig ×4`: that is
@@ -278,21 +278,21 @@ Two markers earn their place:
 
 | | |
 |---|---|
-| `↺ 4` | **the agent undid its own work** — this turn put a file back to exactly what turn 4 left. Round-tripping is what agents do when they are stuck, and it is nearly invisible in a diff, because a diff only shows the endpoints |
-| `↩` | **this turn touched a file you commented on** — the agent answering you, as against doing something else |
+| `↺ 4` | **the agent undid its own work.** This turn put a file back to exactly what turn 4 left. Round-tripping is what agents do when they are stuck, and it is nearly invisible in a diff, because a diff only shows the endpoints |
+| `↩` | **this turn touched a file you commented on**, the agent answering you, as against doing something else |
 | `R` | restore this file from the turn on screen |
 | `u` | undo the last restore |
 
 A turn is read-only: comments, `m` and `<C-s>` refuse there and say why. The
 badge reads `TURN 2` or `BASELINE` so you always know you are in the past, and
-grows a `•` when the working tree changes while you are back there — nothing
+grows a `•` when the working tree changes while you are back there, and nothing
 updates under you, but you are told the world moved.
 
 `R` takes a snapshot **before** it writes, asks before it writes, restores one
 file and no more, and then names the turn that undoes it. It is the only thing
 in `lgtm` that writes to your files.
 
-`u` undoes that restore — one step, this session only. It refuses if anything
+`u` undoes that restore: one step, this session only. It refuses if anything
 has changed the file since, because then putting the old bytes back would not be
 undoing your action, it would be discarding whatever came after it. Going the
 other way is the move the notice names: `[t` to the turn it made, then `R`. That
@@ -312,7 +312,7 @@ them.
 ### 7. Read anything
 
 `<Space>f` lists the changed files; `<Space>F` lists every file git knows about.
-An unchanged file opens whole, outside the review — still readable, still
+An unchanged file opens whole, outside the review, still readable, still
 commentable. A file too large to render inline opens with `zo` and folds again
 with `zc`.
 
@@ -325,7 +325,7 @@ keep theirs, and `zf` folds the lot.
 
 A file that moved says so above its diff, in git's own spelling:
 `moved  src/{old => new}/thing.zig`. A move with no edit in it has nothing else
-to draw, and a path in the header is only ever where the file ended up — so
+to draw, and a path in the header is only ever where the file ended up, so
 without that row an empty body is all you would see.
 
 A file that is not text - an image, a binary, an archive - never renders its
@@ -346,7 +346,7 @@ documents itself. What follows is the defaults.
 | `j` `k` | down and up a line |
 | `h` `l` | left and right a character |
 | `w` `b` `e` | next, previous, end of word |
-| `W` `B` `E` | the same over WORDs — only blanks separate |
+| `W` `B` `E` | the same over WORDs, where only blanks separate |
 | `0` `^` `$` | first, first non-blank, last column |
 | `f` `t` `F` `T` | to or before a character on this line |
 | `;` `,` | repeat the last jump, either way (see below) |
@@ -510,20 +510,20 @@ Kill `lgtm` and restart it; you lose scroll position and nothing else.
 
 ## When something is wrong
 
-**"not a git repository"** — `lgtm` reads `git diff` for a living. The screen
+**"not a git repository".** `lgtm` reads `git diff` for a living. The screen
 shows which directory it means, so you can tell a wrong `cd` from a directory
 that needs `git init`.
 
-**A setting was ignored** — a bad key is reported on the status line with the
+**A setting was ignored.** A bad key is reported on the status line with the
 file and the line. It never stops `lgtm` starting, and it only costs that one
 key its value.
 
-**`y` says copied but the clipboard is empty** — under `tmux`, application OSC
+**`y` says copied but the clipboard is empty.** Under `tmux`, application OSC
 52 is discarded unless `set-clipboard` allows it. `lgtm` uses `tmux
 load-buffer` instead, so this should not happen; if it does, check that `tmux`
 is on your `PATH`.
 
-**Nothing is sent to the agent** — `lgtm` needs to know which pane your agent is
+**Nothing is sent to the agent.** `lgtm` needs to know which pane your agent is
 in. It infers the only other one; with more than two it will not guess. Instead
 it copies your text to the clipboard, so nothing is lost, and opens a list of
 every pane it can see. Type to narrow it, `<CR>` to connect. Picking one also
@@ -545,14 +545,14 @@ costs nothing. tmux only; the other multiplexers list ids and get no panel.
 `<Space>t` opens the same list on purpose, which is how you point `lgtm` at a
 different agent without restarting it. `--pane` still works and is what you
 want in a script: `%3` in tmux, `w1:p1` in herdr, `3` in WezTerm and kitty.
-kitty calls its splits *windows* rather than panes, and `lgtm` says so too —
+kitty calls its splits *windows* rather than panes, and `lgtm` says so too:
 the flag is still `--pane`, because it is one flag.
 
 Only tmux fills in the columns and the panel today; the others list ids, which
 is all they report. Ghostty has no per-pane id at all, so there is nothing to
 pick between — it sends to the focused split.
 
-**kitty says `set allow_remote_control yes`** — kitty refuses to let any process
+**kitty says `set allow_remote_control yes`.** kitty refuses to let any process
 type into your terminal until you allow it. Put `allow_remote_control yes` in
 `kitty.conf` and restart it. Until then `<CR>` degrades to the clipboard, which
 still works; it is a paste away rather than a keystroke away.
@@ -564,37 +564,37 @@ still works; it is a paste away rather than a keystroke away.
 | **tmux** | `send-keys` | also carries the clipboard, because tmux's default `set-clipboard external` swallows an application's OSC 52 |
 | **herdr** | `herdr pane send-text` | pane ids are `w1:p1`. Built for agents, so `send-text` inserts and never submits |
 | **WezTerm** | `wezterm cli send-text` | detected by `$WEZTERM_PANE` |
-| **kitty** | `kitten @ send-text` | needs `allow_remote_control yes` in `kitty.conf` — off by default, on purpose |
-| **Ghostty** | AppleScript | **macOS, Ghostty 1.3+.** Needs Automation access the first time — macOS will ask |
+| **kitty** | `kitten @ send-text` | needs `allow_remote_control yes` in `kitty.conf`, off by default and on purpose |
+| **Ghostty** | AppleScript | **macOS, Ghostty 1.3+.** Needs Automation access the first time, and macOS will ask |
 | **anything else** | OSC 52 | `<CR>` copies instead of sending. Still a paste away |
 
 **Alacritty, iTerm2, Terminal.app** and the rest have no way for one program to
 type into another's split, so `lgtm` falls back to the clipboard there. **Run
-tmux or herdr inside them** and you get the full loop — which is what most
+tmux or herdr inside them** and you get the full loop, which is what most
 people already do, and why both are detected ahead of the terminal they are
 running in.
 
 **Ghostty is a special case.** It gained an AppleScript dictionary in 1.3, so
-`lgtm` can type into another split — on macOS, and after you allow it in
+`lgtm` can type into another split, on macOS and after you allow it in
 System Settings → Privacy & Security → Automation. Ghostty is also the one
 terminal that does not tell a pane which pane it is: there is no
 `$GHOSTTY_PANE`. `lgtm` takes the *focused* split as its own the first time it
 needs to know, which is right because that is the split you just typed `lgtm`
-into — but if you have moved focus first, pass `--pane N`. `osascript -e 'tell
+into, but if you have moved focus first, pass `--pane N`. `osascript -e 'tell
 application "Ghostty" to get id of every terminal'` lists them.
 
 ### Reviewing something other than the working tree
 
 | | |
 |---|---|
-| `lgtm` | HEAD against the working tree — the default, and what the tool is about |
+| `lgtm` | HEAD against the working tree: the default, and what the tool is about |
 | `lgtm --base main` | your whole branch, **including what you have not committed**. Live: the tree is still the right-hand side, so it still updates as the agent writes |
-| `lgtm --base main --target HEAD` | committed work only, as two trees. **Static** — nothing can move, so the watcher, the snapshots and the mark are all off |
+| `lgtm --base main --target HEAD` | committed work only, as two trees. **Static:** nothing can move, so the watcher, the snapshots and the mark are all off |
 
 The badge says which: `main` or `main..HEAD` in the accent instead of `NORMAL`,
 because a diff against a branch looks exactly like a diff against HEAD and
 reading one as the other is the mistake worth preventing.
 
-**Snapshots are not happening** — they need a git repository, and a turn is
+**Snapshots are not happening.** They need a git repository, and a turn is
 taken ten seconds after the agent *stops* writing. Changes made in the first
 half-second of a session are part of the starting state rather than a turn.
