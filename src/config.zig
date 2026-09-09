@@ -963,6 +963,44 @@ test "a bad review.ignore is reported and the review still starts" {
     try testing.expectEqual(@as(usize, 0), l.cfg.ignore.len);
 }
 
+test "a multiline ignore list arrives, and a typo inside it names its own line" {
+    // The seam this config surface promises: a list split over lines reaches
+    // the setting, and a fault inside one is reported at the line holding it
+    // rather than at the `= [` the reader would then have to search from.
+    var l = loadText(
+        \\[review]
+        \\ignore = [
+        \\    "package-lock.json",
+        \\    "dist/**", # generated
+        \\]
+        \\[nav]
+        \\scrolloff = 5
+    );
+    defer l.deinit();
+    try testing.expectEqual(@as(usize, 0), l.problems.items.len);
+    try testing.expectEqual(@as(usize, 2), l.cfg.ignore.len);
+    try testing.expectEqualStrings("dist/**", l.cfg.ignore[1]);
+    try testing.expectEqual(@as(u32, 5), l.cfg.nav.scrolloff);
+
+    var bad = loadText(
+        \\[review]
+        \\ignore = [
+        \\    "package-lock.json",
+        \\    dist/**,
+        \\    "vendor/**",
+        \\]
+        \\[nav]
+        \\scrolloff = 5
+    );
+    defer bad.deinit();
+    // One fault, on line 4, and the rest of the body did not come back as
+    // top-level settings.
+    try testing.expectEqual(@as(usize, 1), bad.problems.items.len);
+    try testing.expectEqual(@as(u32, 4), bad.problems.items[0].line);
+    try testing.expectEqual(@as(usize, 0), bad.cfg.ignore.len);
+    try testing.expectEqual(@as(u32, 5), bad.cfg.nav.scrolloff);
+}
+
 test "keys are remapped by the spelling the popup shows" {
     var l = loadText(
         \\[keys]

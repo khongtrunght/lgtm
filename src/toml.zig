@@ -84,6 +84,8 @@ pub const Parser = struct {
     line_no: u32 = 0,
     /// Set alongside `error.BadEscape`, which cannot carry a payload.
     bad_escape: []const u8 = "",
+    /// The bad line, saved before list recovery advances the scanner.
+    fault_line: ?u32 = null,
 
     pub fn init(arena: Allocator, text: []const u8) Parser {
         return .{ .arena = arena, .lines = std.mem.splitScalar(u8, text, '\n') };
@@ -112,7 +114,12 @@ pub const Parser = struct {
             const start_line = self.line_no;
             const value = self.parseValue(trim(line[eq + 1 ..])) catch |err| {
                 var event = self.faultOf(err, trim(line[eq + 1 ..]));
-                event.problem.line = start_line;
+                if (self.fault_line) |at| {
+                    event.problem.line = at;
+                    self.fault_line = null;
+                } else if (err == error.UnterminatedList) {
+                    event.problem.line = start_line;
+                }
                 return event;
             };
             return .{ .item = .{ .key = key, .value = value, .line = start_line } };
@@ -201,9 +208,7 @@ pub const Parser = struct {
                 const raw = self.lines.peek() orelse return error.UnterminatedList;
                 const line = trim(stripComment(raw));
                 // A missing `]` must not eat the next setting or table.
-                if (line.len != 0 and (line[0] == '[' or
-                    (line[0] != '"' and std.mem.indexOfScalar(u8, line, '=') != null)))
-                    return error.UnterminatedList;
+                if (startsSetting(line)) return error.UnterminatedList;
                 _ = self.lines.next();
                 self.line_no += 1;
                 rest = line;
@@ -213,11 +218,27 @@ pub const Parser = struct {
                 if (trim(rest[1..]).len != 0) return error.TrailingText;
                 return .{ .list = items.items };
             }
-            if (rest[0] != '"') return error.ListWantsStrings;
-            const end = stringEnd(rest) orelse return error.UnterminatedString;
-            try items.append(self.arena, try self.parseString(rest[0 .. end + 1]));
+            if (rest[0] != '"') return self.abandonList(rest, error.ListWantsStrings);
+            const end = stringEnd(rest) orelse return self.abandonList(rest, error.UnterminatedString);
+            const item = self.parseString(rest[0 .. end + 1]) catch |err| return self.abandonList(rest, err);
+            items.append(self.arena, item) catch |err| return self.abandonList(rest, err);
             rest = rest[end + 1 ..];
         }
+    }
+
+    /// Drop a faulty list's remaining body so it cannot become top-level
+    /// settings. A missing `]` must still leave the next setting or table alone.
+    fn abandonList(self: *Parser, rest: []const u8, err: ParseError) ParseError {
+        self.fault_line = self.line_no;
+        if (indexUnquoted(rest, ']') != null) return err;
+        while (self.lines.peek()) |raw| {
+            const line = trim(stripComment(raw));
+            if (startsSetting(line)) break;
+            _ = self.lines.next();
+            self.line_no += 1;
+            if (indexUnquoted(line, ']') != null) break;
+        }
+        return err;
     }
 };
 
@@ -229,18 +250,30 @@ fn trim(s: []const u8) []const u8 {
 /// template string a `[templates]` entry puts in this file, and truncating it
 /// at the `#` would be a silent corruption rather than an error.
 fn stripComment(line: []const u8) []const u8 {
+    return line[0 .. indexUnquoted(line, '#') orelse line.len];
+}
+
+/// A continuation may start with a comma before a string containing `=`.
+/// Only an unquoted assignment or a table header ends an unfinished list.
+fn startsSetting(line: []const u8) bool {
+    return line.len != 0 and (line[0] == '[' or indexUnquoted(line, '=') != null);
+}
+
+/// Find punctuation outside strings; nothing after a comment counts.
+fn indexUnquoted(line: []const u8, needle: u8) ?usize {
     var i: usize = 0;
     while (i < line.len) : (i += 1) {
+        if (line[i] == needle) return i;
         switch (line[i]) {
-            '#' => return line[0..i],
+            '#' => return null,
             '"' => {
-                const end = stringEnd(line[i..]) orelse return line;
+                const end = stringEnd(line[i..]) orelse return null;
                 i += end;
             },
             else => {},
         }
     }
-    return line;
+    return null;
 }
 
 /// Index of the closing quote of the string starting at index 0, or null when
@@ -457,13 +490,13 @@ test "an unfinished list leaves the next setting or table alone" {
     }
 }
 
-test "multiline list faults point to the setting's opening line" {
-    const cases = [_]struct { text: []const u8, fault: Fault }{
-        .{ .text = "names = [\n\"alpha\",\n", .fault = .unterminated_list },
-        .{ .text = "names = [\n3]\n", .fault = .list_wants_strings },
-        .{ .text = "names = [\n\"unfinished\n", .fault = .unterminated_string },
-        .{ .text = "names = [\n\"a\\qb\"]\n", .fault = .bad_escape },
-        .{ .text = "names = [\n\"alpha\"\n] extra\n", .fault = .trailing_text },
+test "multiline list faults name the bad line unless the closing bracket is missing" {
+    const cases = [_]struct { text: []const u8, fault: Fault, line: u32 }{
+        .{ .text = "names = [\n\"alpha\",\n", .fault = .unterminated_list, .line = 1 },
+        .{ .text = "names = [\n3]\n", .fault = .list_wants_strings, .line = 2 },
+        .{ .text = "names = [\n\"unfinished\n", .fault = .unterminated_string, .line = 2 },
+        .{ .text = "names = [\n\"a\\qb\"]\n", .fault = .bad_escape, .line = 2 },
+        .{ .text = "names = [\n\"alpha\"\n] extra\n", .fault = .trailing_text, .line = 3 },
     };
     for (cases) |case| {
         var a: std.heap.ArenaAllocator = .init(testing.allocator);
@@ -472,6 +505,101 @@ test "multiline list faults point to the setting's opening line" {
         try testing.expectEqual(@as(usize, 1), evs.len);
         try testing.expect(evs[0] == .problem);
         try testing.expectEqual(case.fault, evs[0].problem.fault);
+        try testing.expectEqual(case.line, evs[0].problem.line);
+    }
+}
+
+test "a comma before a quoted equals sign does not start a setting" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const evs = (try parseAll(a.allocator(),
+        \\names = [
+        \\    "alpha"
+        \\  , "k=v"
+        \\]
+        \\count = 1
+    )).items;
+    try testing.expectEqual(@as(usize, 2), evs.len);
+    try testing.expect(evs[0] == .item);
+    const list = evs[0].item.value.list;
+    try testing.expectEqual(@as(usize, 2), list.len);
+    try testing.expectEqualStrings("alpha", list[0]);
+    try testing.expectEqualStrings("k=v", list[1]);
+    try testing.expectEqual(@as(i64, 1), evs[1].item.value.integer);
+    try testing.expectEqual(@as(u32, 5), evs[1].item.line);
+}
+
+test "a bad list produces one fault and skips quoted brackets during recovery" {
+    const cases = [_]struct { item: []const u8, fault: Fault }{
+        .{ .item = "3,", .fault = .list_wants_strings },
+        .{ .item = "\"a\\qb\",", .fault = .bad_escape },
+        .{ .item = "\"unfinished", .fault = .unterminated_string },
+        .{ .item = "\"a\\q]b\",", .fault = .bad_escape },
+        .{ .item = "3, \"]\",", .fault = .list_wants_strings },
+        .{ .item = "3, # ]", .fault = .list_wants_strings },
+    };
+    for (cases) |case| {
+        var a: std.heap.ArenaAllocator = .init(testing.allocator);
+        defer a.deinit();
+        const text = try std.fmt.allocPrint(a.allocator(),
+            \\names = [
+            \\{s}
+            \\  , "k=v",
+            \\  "]", # ]
+            \\  "bravo\"=]",
+            \\  # ]
+            \\]
+            \\broken = maybe
+            \\count = 1
+        , .{case.item});
+        const evs = (try parseAll(a.allocator(), text)).items;
+        try testing.expectEqual(@as(usize, 3), evs.len);
+        try testing.expect(evs[0] == .problem);
+        try testing.expectEqual(case.fault, evs[0].problem.fault);
+        try testing.expectEqual(@as(u32, 2), evs[0].problem.line);
+        if (case.fault == .bad_escape) try testing.expectEqualStrings("q", evs[0].problem.text);
+        // Recovery must not leave the saved fault line on the next event.
+        try testing.expectEqual(Fault.unreadable_value, evs[1].problem.fault);
+        try testing.expectEqual(@as(u32, 8), evs[1].problem.line);
+        try testing.expectEqual(@as(i64, 1), evs[2].item.value.integer);
+        try testing.expectEqual(@as(u32, 9), evs[2].item.line);
+    }
+}
+
+test "list recovery stops before the next setting or table without a closing bracket" {
+    const cases = [_][]const u8{ "count = 3", "[next]" };
+    for (cases) |next| {
+        var a: std.heap.ArenaAllocator = .init(testing.allocator);
+        defer a.deinit();
+        const text = try std.fmt.allocPrint(a.allocator(), "names = [\n3,\n\"alpha\",\n{s}\n", .{next});
+        const evs = (try parseAll(a.allocator(), text)).items;
+        try testing.expectEqual(@as(usize, 2), evs.len);
+        try testing.expectEqual(Fault.list_wants_strings, evs[0].problem.fault);
+        try testing.expectEqual(@as(u32, 2), evs[0].problem.line);
+        if (next[0] == '[') {
+            try testing.expectEqualStrings("next", evs[1].table.name);
+            try testing.expectEqual(@as(u32, 4), evs[1].table.line);
+        } else {
+            try testing.expectEqual(@as(i64, 3), evs[1].item.value.integer);
+            try testing.expectEqual(@as(u32, 4), evs[1].item.line);
+        }
+    }
+}
+
+test "list recovery stops at a closing bracket on the bad line or at end of file" {
+    const cases = [_][]const u8{
+        "names = [3]\ncount = 1",
+        "names = [\"a\\qb\"]\ncount = 1",
+        "names = [3,\n\"alpha\"]\ncount = 1",
+        "names = [3,\n\"alpha\",\n",
+    };
+    for (cases, 0..) |text, i| {
+        var a: std.heap.ArenaAllocator = .init(testing.allocator);
+        defer a.deinit();
+        const evs = (try parseAll(a.allocator(), text)).items;
+        try testing.expectEqual(@as(usize, if (i == 3) 1 else 2), evs.len);
+        try testing.expect(evs[0] == .problem);
         try testing.expectEqual(@as(u32, 1), evs[0].problem.line);
+        if (evs.len == 2) try testing.expectEqual(@as(i64, 1), evs[1].item.value.integer);
     }
 }
