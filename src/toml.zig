@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // A small TOML subset, as a scanner: `[table]` headers, `key = value`,
-// strings, booleans, integers, and single-line arrays of strings. No dates, no
+// strings, booleans, integers, and arrays of strings. No dates, no
 // nested tables, no multi-line strings, no inline tables. That is everything
 // lgtm's config surface needs, in a parser small enough to read in one sitting
 // - and small enough to replace with a real dependency without any caller
@@ -90,9 +90,9 @@ pub const Parser = struct {
     }
 
     /// The next event, or null at the end of the document. Blank lines and
-    /// comments produce nothing; every other line produces exactly one event,
-    /// so a caller that stops at the first problem and one that reports them
-    /// all are both ordinary loops.
+    /// comments produce nothing; a setting produces one event even when its
+    /// list spans several lines. A caller that stops at the first problem and
+    /// one that reports them all are both ordinary loops.
     pub fn next(self: *Parser) ?Event {
         while (self.lines.next()) |raw| {
             self.line_no += 1;
@@ -109,8 +109,13 @@ pub const Parser = struct {
             const key = trim(line[0..eq]);
             if (key.len == 0) return self.fault(.missing_key, "");
 
-            const value = self.parseValue(trim(line[eq + 1 ..])) catch |err| return self.faultOf(err, trim(line[eq + 1 ..]));
-            return .{ .item = .{ .key = key, .value = value, .line = self.line_no } };
+            const start_line = self.line_no;
+            const value = self.parseValue(trim(line[eq + 1 ..])) catch |err| {
+                var event = self.faultOf(err, trim(line[eq + 1 ..]));
+                event.problem.line = start_line;
+                return event;
+            };
+            return .{ .item = .{ .key = key, .value = value, .line = start_line } };
         }
         return null;
     }
@@ -188,19 +193,31 @@ pub const Parser = struct {
     }
 
     fn parseList(self: *Parser, text: []const u8) ParseError!Value {
-        if (text[text.len - 1] != ']') return error.UnterminatedList;
-
         var items: std.ArrayList([]const u8) = .empty;
-        var i: usize = 1;
-        while (i < text.len - 1) {
-            while (i < text.len - 1 and (text[i] == ' ' or text[i] == '\t' or text[i] == ',')) i += 1;
-            if (i >= text.len - 1) break;
-            if (text[i] != '"') return error.ListWantsStrings;
-            const end = stringEnd(text[i..]) orelse return error.UnterminatedString;
-            try items.append(self.arena, try self.parseString(text[i .. i + end + 1]));
-            i += end + 1;
+        var rest = text[1..];
+        while (true) {
+            rest = std.mem.trimStart(u8, rest, " \t\r,");
+            if (rest.len == 0) {
+                const raw = self.lines.peek() orelse return error.UnterminatedList;
+                const line = trim(stripComment(raw));
+                // A missing `]` must not eat the next setting or table.
+                if (line.len != 0 and (line[0] == '[' or
+                    (line[0] != '"' and std.mem.indexOfScalar(u8, line, '=') != null)))
+                    return error.UnterminatedList;
+                _ = self.lines.next();
+                self.line_no += 1;
+                rest = line;
+                continue;
+            }
+            if (rest[0] == ']') {
+                if (trim(rest[1..]).len != 0) return error.TrailingText;
+                return .{ .list = items.items };
+            }
+            if (rest[0] != '"') return error.ListWantsStrings;
+            const end = stringEnd(rest) orelse return error.UnterminatedString;
+            try items.append(self.arena, try self.parseString(rest[0 .. end + 1]));
+            rest = rest[end + 1 ..];
         }
-        return .{ .list = items.items };
     }
 };
 
@@ -361,4 +378,100 @@ test "a setting before any table header still arrives" {
     const evs = (try parseAll(a.allocator(), "stray = 1\n")).items;
     try testing.expectEqual(@as(usize, 1), evs.len);
     try testing.expectEqualStrings("stray", evs[0].item.key);
+}
+
+test "string lists can span lines" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const evs = (try parseAll(a.allocator(),
+        \\[settings]
+        \\names = [ # opening comment
+        \\    "alpha", # first item
+        \\
+        \\    # between items
+        \\    "bravo#]", "charlie\"",
+        \\] # closing comment
+        \\count = 3
+    )).items;
+
+    try testing.expectEqual(@as(usize, 3), evs.len);
+    try testing.expect(evs[1] == .item);
+    try testing.expectEqualStrings("names", evs[1].item.key);
+    try testing.expectEqual(@as(u32, 2), evs[1].item.line);
+    const list = evs[1].item.value.list;
+    try testing.expectEqual(@as(usize, 3), list.len);
+    try testing.expectEqualStrings("alpha", list[0]);
+    try testing.expectEqualStrings("bravo#]", list[1]);
+    try testing.expectEqualStrings("charlie\"", list[2]);
+    try testing.expectEqual(@as(i64, 3), evs[2].item.value.integer);
+    try testing.expectEqual(@as(u32, 8), evs[2].item.line);
+}
+
+test "list layout does not change its values" {
+    const cases = [_][]const u8{
+        "names = [\"alpha\", \"bravo\"]",
+        "names = [\n\"alpha\",\n\"bravo\"\n]",
+        "names = [\"alpha\",\n\"bravo\",]\n",
+        "names = [\r\n\t\"alpha\", # first\r\n\t\"bravo\",\r\n]\r\n",
+    };
+    for (cases) |text| {
+        var a: std.heap.ArenaAllocator = .init(testing.allocator);
+        defer a.deinit();
+        const evs = (try parseAll(a.allocator(), text)).items;
+        try testing.expectEqual(@as(usize, 1), evs.len);
+        try testing.expect(evs[0] == .item);
+        const list = evs[0].item.value.list;
+        try testing.expectEqual(@as(usize, 2), list.len);
+        try testing.expectEqualStrings("alpha", list[0]);
+        try testing.expectEqualStrings("bravo", list[1]);
+    }
+}
+
+test "a multiline list can be empty" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const evs = (try parseAll(a.allocator(), "names = [\n# nothing here\n\n]\n")).items;
+    try testing.expectEqual(@as(usize, 1), evs.len);
+    try testing.expect(evs[0] == .item);
+    try testing.expectEqual(@as(usize, 0), evs[0].item.value.list.len);
+}
+
+test "an unfinished list leaves the next setting or table alone" {
+    const cases = [_][]const u8{ "count = 3", "[next]" };
+    for (cases) |next| {
+        var a: std.heap.ArenaAllocator = .init(testing.allocator);
+        defer a.deinit();
+        const text = try std.fmt.allocPrint(a.allocator(), "names = [\n\"alpha\",\n{s}\n", .{next});
+        const evs = (try parseAll(a.allocator(), text)).items;
+        try testing.expectEqual(@as(usize, 2), evs.len);
+        try testing.expect(evs[0] == .problem);
+        try testing.expectEqual(Fault.unterminated_list, evs[0].problem.fault);
+        try testing.expectEqual(@as(u32, 1), evs[0].problem.line);
+        if (next[0] == '[') {
+            try testing.expectEqualStrings("next", evs[1].table.name);
+            try testing.expectEqual(@as(u32, 3), evs[1].table.line);
+        } else {
+            try testing.expectEqual(@as(i64, 3), evs[1].item.value.integer);
+            try testing.expectEqual(@as(u32, 3), evs[1].item.line);
+        }
+    }
+}
+
+test "multiline list faults point to the setting's opening line" {
+    const cases = [_]struct { text: []const u8, fault: Fault }{
+        .{ .text = "names = [\n\"alpha\",\n", .fault = .unterminated_list },
+        .{ .text = "names = [\n3]\n", .fault = .list_wants_strings },
+        .{ .text = "names = [\n\"unfinished\n", .fault = .unterminated_string },
+        .{ .text = "names = [\n\"a\\qb\"]\n", .fault = .bad_escape },
+        .{ .text = "names = [\n\"alpha\"\n] extra\n", .fault = .trailing_text },
+    };
+    for (cases) |case| {
+        var a: std.heap.ArenaAllocator = .init(testing.allocator);
+        defer a.deinit();
+        const evs = (try parseAll(a.allocator(), case.text)).items;
+        try testing.expectEqual(@as(usize, 1), evs.len);
+        try testing.expect(evs[0] == .problem);
+        try testing.expectEqual(case.fault, evs[0].problem.fault);
+        try testing.expectEqual(@as(u32, 1), evs[0].problem.line);
+    }
 }
