@@ -8,7 +8,7 @@
 // a tool people uninstall.
 //
 // The subset is deliberate rather than aspirational: `[table]` headers,
-// `key = value`, strings, booleans, integers, and single-line arrays of
+// `key = value`, strings, booleans, integers, and arrays of
 // strings. No dates, no nested tables, no multi-line strings, no inline
 // tables. That is everything the v0.1 surface needs, in a parser small enough
 // to read in one sitting - and a real dependency can replace it later without
